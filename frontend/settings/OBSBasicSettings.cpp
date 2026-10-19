@@ -349,6 +349,14 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 
 	ui->setupUi(this);
 
+	/* AkvariumOBS: voice command settings inside the Replay Buffer sections */
+	voiceSimple = new akvarium::VoiceCommandSettings(this);
+	if (auto *replayLayout = qobject_cast<QFormLayout *>(ui->simpleReplayBuf->layout()))
+		replayLayout->addRow(voiceSimple);
+	voiceAdv = new akvarium::VoiceCommandSettings(this);
+	if (auto *advLayout = ui->advOutputReplayFrame->layout())
+		advLayout->addWidget(voiceAdv);
+
 	main->EnableOutputs(false);
 
 	ui->listWidget->setAttribute(Qt::WA_MacShowFocusRect, false);
@@ -2231,6 +2239,11 @@ void OBSBasicSettings::LoadOutputSettings()
 {
 	loading = true;
 
+	if (voiceSimple)
+		voiceSimple->Load();
+	if (voiceAdv)
+		voiceAdv->Load();
+
 	ResetEncoders();
 
 	const char *mode = config_get_string(main->Config(), "Output", "Mode");
@@ -3467,6 +3480,11 @@ void OBSBasicSettings::SaveEncoder(QComboBox *combo, const char *section, const 
 
 void OBSBasicSettings::SaveOutputSettings()
 {
+	if (voiceSimple)
+		voiceSimple->Save();
+	if (voiceAdv)
+		voiceAdv->Save();
+
 	config_set_string(main->Config(), "Output", "Mode", OutputModeFromIdx(ui->outputMode->currentIndex()));
 
 	QString encoder = ui->simpleOutStrEncoder->currentData().toString();

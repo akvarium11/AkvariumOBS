@@ -3,6 +3,12 @@ target_sources(
   PRIVATE
     utility/AdvancedOutput.cpp
     utility/AdvancedOutput.hpp
+    utility/AkvariumSceneAudio.cpp
+    utility/AkvariumSceneAudio.hpp
+    utility/AkvariumVoice.cpp
+    utility/AkvariumVoice.hpp
+    utility/AkvariumVoiceSettings.cpp
+    utility/AkvariumVoiceSettings.hpp
     utility/BaseLexer.hpp
     utility/BasicOutputHandler.cpp
     utility/BasicOutputHandler.hpp

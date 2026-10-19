@@ -20,6 +20,7 @@
 
 #include "ui_OBSBasicSettings.h"
 
+#include <utility/AkvariumVoiceSettings.hpp>
 #include <utility/FFmpegShared.hpp>
 
 #include <QPointer>
@@ -118,6 +119,10 @@ private:
 	uint32_t outputCY = 0;
 
 	QPointer<QCheckBox> simpleVodTrack;
+
+	/* AkvariumOBS: voice command settings (replay buffer page) */
+	QPointer<akvarium::VoiceCommandSettings> voiceSimple;
+	QPointer<akvarium::VoiceCommandSettings> voiceAdv;
 
 	QPointer<QCheckBox> vodTrackCheckbox;
 	QPointer<QWidget> vodTrackContainer;

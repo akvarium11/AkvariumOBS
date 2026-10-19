@@ -22,6 +22,8 @@
 
 #include <dialogs/NameDialog.hpp>
 
+#include <utility/AkvariumSceneAudio.hpp>
+
 #include <qt-wrappers.hpp>
 
 #include <QLineEdit>
@@ -620,6 +622,27 @@ void OBSBasic::on_scenes_customContextMenuRequested(const QPoint &pos)
 		};
 
 		connect(multiviewAction, &QAction::triggered, multiviewAction, std::bind(showInMultiview, data.Get()));
+
+		/* AkvariumOBS: per-scene audio mixer state */
+		{
+			OBSScene clickedScene = GetOBSRef<OBSScene>(item);
+			OBSSource clickedSource = obs_scene_get_source(clickedScene);
+
+			popup.addSeparator();
+
+			QAction *rememberAudio =
+				popup.addAction(QStringLiteral("Запоминать громкость и mute для этой сцены"));
+			rememberAudio->setCheckable(true);
+			rememberAudio->setChecked(akvarium::SceneAudioState::SceneEnabled(clickedSource));
+			connect(rememberAudio, &QAction::toggled, this, [clickedSource](bool enabled) {
+				akvarium::SceneAudioState::SetSceneEnabled(clickedSource, enabled);
+			});
+
+			QAction *captureAudio =
+				popup.addAction(QStringLiteral("Запомнить текущее аудио-состояние сцены"));
+			connect(captureAudio, &QAction::triggered, this,
+				[clickedSource]() { akvarium::SceneAudioState::SaveSceneState(clickedSource, true); });
+		}
 
 		copyFilters->setEnabled(obs_source_filter_count(source) > 0);
 	}

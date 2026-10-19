@@ -12,6 +12,17 @@ endif()
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil avformat)
 find_package(CURL REQUIRED)
 
+# AkvariumOBS: local speech recognition for replay buffer voice commands
+set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
+set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+if(NOT TARGET whisper)
+  add_subdirectory("${CMAKE_SOURCE_DIR}/deps/whisper.cpp" whisper_cpp EXCLUDE_FROM_ALL)
+endif()
+
 if(NOT TARGET OBS::json11)
   add_subdirectory("${CMAKE_SOURCE_DIR}/deps/json11" json11)
 endif()
@@ -38,6 +49,7 @@ target_link_libraries(
     OBS::frontend-api
     OBS::json11
     OBS::bpm
+    whisper
 )
 
 include(cmake/ui-components.cmake)
@@ -112,4 +124,4 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Source Files" FILES ${ta
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Header Files" FILES ${target_hpp_sources})
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Qt Files" FILES ${target_qt_sources})
 
-set_target_properties_obs(obs-studio PROPERTIES FOLDER frontend OUTPUT_NAME "$<IF:$<PLATFORM_ID:Windows>,obs64,obs>")
+set_target_properties_obs(obs-studio PROPERTIES FOLDER frontend OUTPUT_NAME "$<IF:$<PLATFORM_ID:Windows>,AkvariumOBS,akvariumobs>")

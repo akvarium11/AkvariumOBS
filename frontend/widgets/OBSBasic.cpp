@@ -39,6 +39,9 @@
 #include <dialogs/OBSBasicTransform.hpp>
 #include <models/SceneCollection.hpp>
 #include <settings/OBSBasicSettings.hpp>
+#include <utility/AkvariumSceneAudio.hpp>
+#include <utility/AkvariumVoice.hpp>
+#include <docks/AkvariumAppScenes.hpp>
 #include <utility/QuickTransition.hpp>
 #include <utility/SceneRenameDelegate.hpp>
 #if defined(_WIN32) || defined(WHATSNEW_ENABLED)
@@ -1370,6 +1373,11 @@ void OBSBasic::OBSInit()
 	UpdatePreviewProgramIndicators();
 	OnFirstLoad();
 
+	/* AkvariumOBS: fork features */
+	akvarium::SceneAudioState::Init(this);
+	akvarium::AppSceneEngine::Init(this);
+	akvarium::VoiceEngine::Init(this);
+
 	if (!hideWindowOnStart) {
 		activateWindow();
 	}
@@ -2127,9 +2135,9 @@ void OBSBasic::UpdateTitleBar()
 	const char *profile = config_get_string(App()->GetUserConfig(), "Basic", "Profile");
 	const char *sceneCollection = config_get_string(App()->GetUserConfig(), "Basic", "SceneCollection");
 
-	name << "OBS ";
+	name << "AkvariumOBS ";
 	if (previewProgramMode) {
-		name << "Studio ";
+		name << Str("TitleBar.StudioMode") << " ";
 	}
 
 	name << App()->GetVersionString(false);

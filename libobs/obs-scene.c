@@ -2033,7 +2033,8 @@ obs_data_t *obs_scene_get_audio_state(obs_scene_t *scene)
 	full_lock(scene);
 	if (!scene->audio_state)
 		scene->audio_state = obs_data_create();
-	obs_data_t *state = obs_data_get_ref(scene->audio_state);
+	obs_data_t *state = scene->audio_state;
+	obs_data_addref(state);
 	full_unlock(scene);
 
 	return state;
@@ -2046,7 +2047,9 @@ void obs_scene_set_audio_state(obs_scene_t *scene, obs_data_t *state)
 
 	full_lock(scene);
 	obs_data_release(scene->audio_state);
-	scene->audio_state = state ? obs_data_get_ref(state) : NULL;
+	scene->audio_state = state;
+	if (scene->audio_state)
+		obs_data_addref(scene->audio_state);
 	full_unlock(scene);
 }
 
