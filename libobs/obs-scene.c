@@ -237,6 +237,7 @@ static void scene_destroy(void *data)
 
 	pthread_mutex_destroy(&scene->video_mutex);
 	pthread_mutex_destroy(&scene->audio_mutex);
+	obs_data_release(scene->audio_state);
 	bfree(scene);
 }
 
@@ -1289,6 +1290,13 @@ static void scene_load(void *data, obs_data_t *settings)
 
 	scene->absolute_coordinates = obs_data_get_bool(obs->data.private_data, "AbsoluteCoordinates");
 
+	/* AkvariumOBS: restore per-scene audio mixer state */
+	obs_data_t *audio_state = obs_data_get_obj(settings, "akvarium_audio_state");
+	if (audio_state) {
+		obs_data_release(scene->audio_state);
+		scene->audio_state = audio_state;
+	}
+
 	if (!items)
 		return;
 
@@ -1457,6 +1465,10 @@ static void scene_save(void *data, obs_data_t *settings)
 
 	obs_data_set_array(settings, "items", array);
 	obs_data_array_release(array);
+
+	/* AkvariumOBS: persist per-scene audio mixer state with the scene */
+	if (scene->audio_state)
+		obs_data_set_obj(settings, "akvarium_audio_state", scene->audio_state);
 }
 
 static uint32_t canvas_getwidth(obs_weak_canvas_t *weak)
@@ -2011,6 +2023,31 @@ void obs_scene_release(obs_scene_t *scene)
 obs_source_t *obs_scene_get_source(const obs_scene_t *scene)
 {
 	return scene ? scene->source : NULL;
+}
+
+obs_data_t *obs_scene_get_audio_state(obs_scene_t *scene)
+{
+	if (!scene)
+		return NULL;
+
+	full_lock(scene);
+	if (!scene->audio_state)
+		scene->audio_state = obs_data_create();
+	obs_data_t *state = obs_data_get_ref(scene->audio_state);
+	full_unlock(scene);
+
+	return state;
+}
+
+void obs_scene_set_audio_state(obs_scene_t *scene, obs_data_t *state)
+{
+	if (!scene)
+		return;
+
+	full_lock(scene);
+	obs_data_release(scene->audio_state);
+	scene->audio_state = state ? obs_data_get_ref(state) : NULL;
+	full_unlock(scene);
 }
 
 obs_scene_t *obs_scene_from_source(const obs_source_t *source)

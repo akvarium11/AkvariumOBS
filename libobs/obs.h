@@ -1683,6 +1683,16 @@ EXPORT obs_scene_t *obs_scene_get_ref(obs_scene_t *scene);
 /** Gets the scene's source context */
 EXPORT obs_source_t *obs_scene_get_source(const obs_scene_t *scene);
 
+/**
+ * AkvariumOBS: per-scene audio mixer state.
+ * Returns a new reference to the scene's stored audio state (never NULL for a
+ * valid scene; an empty object is created on demand).
+ */
+EXPORT obs_data_t *obs_scene_get_audio_state(obs_scene_t *scene);
+
+/** AkvariumOBS: replaces the scene's stored audio state. */
+EXPORT void obs_scene_set_audio_state(obs_scene_t *scene, obs_data_t *state);
+
 /** Gets the scene from its source, or NULL if not a scene */
 EXPORT obs_scene_t *obs_scene_from_source(const obs_source_t *source);
 
