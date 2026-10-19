@@ -24,6 +24,11 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
+#include <windows.h>
+#include <mmdeviceapi.h>
+#include <propsys.h>
+#include <functiondiscoverykeys_devpkey.h>
+
 #include <algorithm>
 
 namespace akvarium {
@@ -127,6 +132,7 @@ void VoiceCommandSettings::RefreshMics()
 	m_mic->clear();
 	m_mic->addItem(QStringLiteral("Auto - active microphone of the current scene"), QString());
 
+	/* OBS audio sources (they know their device id). */
 	obs_enum_sources(
 		[](void *param, obs_source_t *source) {
 			auto *combo = static_cast<QComboBox *>(param);
@@ -134,15 +140,74 @@ void VoiceCommandSettings::RefreshMics()
 				return true;
 
 			const char *id = obs_source_get_id(source);
-			if (!id || !strstr(id, "input"))
+			if (!id || (!strstr(id, "input") && !strstr(id, "output_capture")))
 				return true;
 
 			const char *name = obs_source_get_name(source);
 			if (name)
-				combo->addItem(QString::fromUtf8(name), QString::fromUtf8(name));
+				combo->addItem(QStringLiteral("OBS: %1").arg(QString::fromUtf8(name)),
+					       QStringLiteral("source:%1").arg(QString::fromUtf8(name)));
 			return true;
 		},
 		m_mic);
+
+	/* Windows endpoints, so a device does not have to be an OBS source. */
+	HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+	if (SUCCEEDED(comResult)) {
+		IMMDeviceEnumerator *enumerator = nullptr;
+		if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+					       __uuidof(IMMDeviceEnumerator), (void **)&enumerator))) {
+			for (EDataFlow flow : {eCapture, eRender}) {
+				IMMDeviceCollection *collection = nullptr;
+				if (FAILED(enumerator->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &collection)) ||
+				    !collection)
+					continue;
+
+				UINT count = 0;
+				collection->GetCount(&count);
+
+				for (UINT i = 0; i < count; i++) {
+					IMMDevice *device = nullptr;
+					if (FAILED(collection->Item(i, &device)) || !device)
+						continue;
+
+					LPWSTR id = nullptr;
+					if (SUCCEEDED(device->GetId(&id)) && id) {
+						IPropertyStore *props = nullptr;
+						QString label;
+						if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props)) && props) {
+							PROPVARIANT value;
+							PropVariantInit(&value);
+							if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &value)) &&
+							    value.vt == VT_LPWSTR)
+								label = QString::fromWCharArray(value.pwszVal);
+							PropVariantClear(&value);
+							props->Release();
+						}
+
+						const QString prefix = flow == eRender ? QStringLiteral("loopback:")
+										       : QStringLiteral("wasapi:");
+						m_mic->addItem(QStringLiteral("%1: %2")
+								       .arg(flow == eRender ? QStringLiteral("Output")
+											    : QStringLiteral("Input"),
+									    label.isEmpty() ? QString::fromWCharArray(id) : label),
+							       prefix + QString::fromWCharArray(id));
+
+						CoTaskMemFree(id);
+					}
+
+					device->Release();
+				}
+
+				collection->Release();
+			}
+
+			enumerator->Release();
+		}
+
+		CoUninitialize();
+	}
 
 	m_mic->blockSignals(false);
 }

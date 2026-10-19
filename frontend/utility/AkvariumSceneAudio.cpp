@@ -191,7 +191,11 @@ void SceneAudioState::FrontendEvent(obs_frontend_event event)
 	}
 
 	case OBS_FRONTEND_EVENT_EXIT:
-		SaveCurrentNow();
+		/* Scene data is already torn down here: only stop our timers and drop
+		   references, otherwise shutdown would touch freed sources. */
+		saveTimer.stop();
+		lastScene = nullptr;
+		pendingScene = nullptr;
 		break;
 
 	default:

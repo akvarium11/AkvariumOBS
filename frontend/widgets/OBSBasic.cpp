@@ -1295,9 +1295,9 @@ void OBSBasic::OBSInit()
 		config_save_safe(App()->GetUserConfig(), "tmp", nullptr);
 	}
 
-	if (!first_run && !has_last_version && !Active()) {
-		QMetaObject::invokeMethod(this, "on_autoConfigure_triggered", Qt::QueuedConnection);
-	}
+	/* AkvariumOBS: no first-run setup wizard. */
+	UNUSED_PARAMETER(has_last_version);
+	UNUSED_PARAMETER(first_run);
 
 #if (defined(_WIN32) || defined(__APPLE__)) && (OBS_RELEASE_CANDIDATE > 0 || OBS_BETA > 0)
 	/* Automatically set branch to "beta" the first time a pre-release build is run. */
@@ -1951,11 +1951,7 @@ bool OBSBasic::isReadyToClose()
 
 bool OBSBasic::shouldPromptForClose()
 {
-	bool confirmOnExit = config_get_bool(App()->GetUserConfig(), "General", "ConfirmOnExit");
-	if (confirmOnExit && outputHandler && outputHandler->Active() && !clearingFailed) {
-		return true;
-	}
-
+	/* AkvariumOBS: closing never asks for confirmation, even while recording. */
 	return false;
 }
 

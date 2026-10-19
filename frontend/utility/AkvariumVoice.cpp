@@ -26,6 +26,8 @@
 #include <windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#include <propsys.h>
+#include <functiondiscoverykeys_devpkey.h>
 
 #include <algorithm>
 #include <cmath>
@@ -312,6 +314,8 @@ void VoiceEngine::Init(OBSBasic *main)
 			if (event == OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTED ||
 			    event == OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED)
 				QMetaObject::invokeMethod(self, [self]() { self->Apply(); }, Qt::QueuedConnection);
+			else if (event == OBS_FRONTEND_EVENT_EXIT)
+				self->Shutdown();
 		},
 		engineInstance);
 
@@ -398,6 +402,11 @@ void VoiceEngine::Apply()
 	SetStatus(QStringLiteral("Слушаю микрофон"));
 }
 
+void VoiceEngine::Shutdown()
+{
+	Stop();
+}
+
 void VoiceEngine::Stop()
 {
 	if (!m_running.exchange(false))
@@ -413,14 +422,40 @@ void VoiceEngine::Stop()
 	m_listening = false;
 }
 
-QString VoiceEngine::ResolveDeviceId() const
+/* Resolves the microphone selection into a device spec:
+   ""                            -> active mic of the current scene (or default)
+   "wasapi:<endpoint id>"        -> a Windows capture device
+   "loopback:<endpoint id>"      -> a Windows render device captured via loopback
+   "source:<OBS source name>"    -> device used by an OBS audio source          */
+QString VoiceEngine::ResolveDeviceSpec() const
 {
+	const QString selection = m_config.micSource.trimmed();
+
+	if (selection.startsWith(QStringLiteral("wasapi:")) || selection.startsWith(QStringLiteral("loopback:")))
+		return selection;
+
+	QString sourceName = selection;
+	if (sourceName.startsWith(QStringLiteral("source:")))
+		sourceName = sourceName.mid(7);
+
 	obs_source_t *source = nullptr;
 
-	if (!m_config.micSource.isEmpty()) {
-		source = obs_get_source_by_name(m_config.micSource.toUtf8().constData());
+	if (!sourceName.isEmpty()) {
+		source = obs_get_source_by_name(sourceName.toUtf8().constData());
+		if (!source) {
+			/* Global audio devices are private sources: look through mixer channels. */
+			for (int channel = 1; channel < 7 && !source; channel++) {
+				obs_source_t *candidate = obs_get_output_source(channel);
+				if (!candidate)
+					continue;
+				const char *name = obs_source_get_name(candidate);
+				if (name && sourceName == QString::fromUtf8(name))
+					source = obs_source_get_ref(candidate);
+				obs_source_release(candidate);
+			}
+		}
 	} else {
-		/* Follow the active scene: first audio capture source wins. */
+		/* Follow the active scene: first active audio capture source wins. */
 		obs_source_t *sceneSource = obs_frontend_get_current_scene();
 		obs_scene_t *scene = obs_scene_from_source(sceneSource);
 
@@ -435,7 +470,7 @@ QString VoiceEngine::ResolveDeviceId() const
 					if ((obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) == 0)
 						return true;
 					const char *id = obs_source_get_id(src);
-					if (id && (strstr(id, "input_capture") || strstr(id, "input"))) {
+					if (id && strstr(id, "input_capture")) {
 						*out = obs_source_get_ref(src);
 						return false;
 					}
@@ -448,45 +483,71 @@ QString VoiceEngine::ResolveDeviceId() const
 			obs_source_release(sceneSource);
 	}
 
-	QString deviceId;
+	QString spec;
 	if (source) {
 		obs_data_t *settings = obs_source_get_settings(source);
 		const char *id = obs_data_get_string(settings, "device_id");
-		if (id)
-			deviceId = QString::fromUtf8(id);
+		const char *sourceId = obs_source_get_id(source);
+		if (id && *id) {
+			const bool loopback = sourceId && strstr(sourceId, "output_capture");
+			spec = loopback ? QStringLiteral("loopback:%1").arg(QString::fromUtf8(id))
+					: QStringLiteral("wasapi:%1").arg(QString::fromUtf8(id));
+		} else if (sourceId && strstr(sourceId, "output_capture")) {
+			spec = QStringLiteral("loopback:default");
+		}
 		obs_data_release(settings);
 		obs_source_release(source);
 	}
 
-	return deviceId;
+	return spec;
 }
 
 void VoiceEngine::CaptureLoop()
 {
-	QString deviceId = ResolveDeviceId();
+	const QString spec = ResolveDeviceSpec();
+	m_loopback = spec.startsWith(QStringLiteral("loopback:"));
 
 	IMMDevice *device = nullptr;
 	IAudioClient *client = nullptr;
 	IAudioCaptureClient *capture = nullptr;
 	int sampleRate = 0;
 
-	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
+	const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	if (FAILED(comResult)) {
+		SetStatus(QStringLiteral("COM init failed"));
 		return;
+	}
 
-	if (!OpenCapture(deviceId, (void **)&device, (void **)&client, (void **)&capture, &sampleRate)) {
-		SetStatus(QStringLiteral("Не удалось открыть микрофон"));
+	if (!OpenCapture(spec, (void **)&device, (void **)&client, (void **)&capture, &sampleRate)) {
+		blog(LOG_WARNING, "[AkvariumVoice] cannot open audio device '%s'", spec.toUtf8().constData());
+		SetStatus(QStringLiteral("Cannot open microphone"));
 		CoUninitialize();
 		return;
 	}
 
-	const UINT32 blockAlign = sizeof(float);
+	blog(LOG_INFO, "[AkvariumVoice] capturing '%s' at %d Hz, %d ch%s", spec.toUtf8().constData(), m_sampleRate,
+	     m_channels, m_loopback ? " (loopback)" : "");
+
+	ULONGLONG lastReport = GetTickCount64();
+	UINT64 totalPackets = 0;
+	UINT64 totalFrames = 0;
 
 	while (m_running) {
 		Sleep(10);
 
 		UINT32 packetSize = 0;
-		if (FAILED(capture->GetNextPacketSize(&packetSize)))
+		HRESULT nextResult = capture->GetNextPacketSize(&packetSize);
+		if (FAILED(nextResult)) {
+			blog(LOG_WARNING, "[AkvariumVoice] GetNextPacketSize failed 0x%08lX", (unsigned long)nextResult);
 			break;
+		}
+
+		const ULONGLONG now = GetTickCount64();
+		if (now - lastReport >= 3000) {
+			blog(LOG_DEBUG, "[AkvariumVoice] capture stats: packets=%llu frames=%llu",
+			     (unsigned long long)totalPackets, (unsigned long long)totalFrames);
+			lastReport = now;
+		}
 
 		while (packetSize > 0) {
 			BYTE *data = nullptr;
@@ -496,19 +557,21 @@ void VoiceEngine::CaptureLoop()
 			if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr)))
 				break;
 
+			totalPackets++;
+			totalFrames += frames;
 			if (frames > 0) {
 				if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-					std::vector<float> silence(frames, 0.0f);
-					Feed(silence.data(), frames);
+					std::vector<float> silence((size_t)frames * m_channels, 0.0f);
+					Feed(silence.data(), frames, m_channels);
 				} else {
-					Feed(reinterpret_cast<const float *>(data), frames);
+					Feed(reinterpret_cast<const float *>(data), frames, m_channels);
 				}
 			}
 
 			capture->ReleaseBuffer(frames);
-			UNUSED_PARAMETER(blockAlign);
 
-			if (FAILED(capture->GetNextPacketSize(&packetSize)))
+			nextResult = capture->GetNextPacketSize(&packetSize);
+			if (FAILED(nextResult))
 				break;
 		}
 	}
@@ -522,7 +585,7 @@ void VoiceEngine::CaptureLoop()
 	m_listening = false;
 }
 
-bool VoiceEngine::OpenCapture(const QString &deviceId, void **outDevice, void **outClient, void **outCapture,
+bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void **outClient, void **outCapture,
 			      int *outSampleRate)
 {
 	const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
@@ -533,26 +596,42 @@ bool VoiceEngine::OpenCapture(const QString &deviceId, void **outDevice, void **
 				    (void **)&enumerator)))
 		return false;
 
-	IMMDevice *device = nullptr;
-	bool opened = false;
+	const bool loopback = deviceSpec.startsWith(QStringLiteral("loopback:"));
+	QString deviceId = deviceSpec;
+	const int colon = deviceSpec.indexOf(QChar(':'));
+	if (colon > 0)
+		deviceId = deviceSpec.mid(colon + 1);
 
-	if (!deviceId.isEmpty()) {
+	IMMDevice *device = nullptr;
+
+	if (!deviceId.isEmpty() && deviceId != QStringLiteral("default")) {
 		const std::wstring wide = deviceId.toStdWString();
-		if (SUCCEEDED(enumerator->GetDevice(wide.c_str(), &device)))
-			opened = true;
+		enumerator->GetDevice(wide.c_str(), &device);
 	}
 
-	if (!opened) {
-		if (FAILED(enumerator->GetDefaultAudioEndpoint(eCapture, eCommunications, &device)))
+	if (!device) {
+		/* OBS itself uses the console role for "Default" devices. */
+		const EDataFlow flow = loopback ? eRender : eCapture;
+		if (FAILED(enumerator->GetDefaultAudioEndpoint(flow, eConsole, &device))) {
 			enumerator->Release();
-		else
-			opened = true;
+			return false;
+		}
+	}
+
+	if (device) {
+		IPropertyStore *props = nullptr;
+		if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props)) && props) {
+			PROPVARIANT value;
+			PropVariantInit(&value);
+			if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &value)) && value.vt == VT_LPWSTR)
+				blog(LOG_INFO, "[AkvariumVoice] device: '%s'",
+				     QString::fromWCharArray(value.pwszVal).toUtf8().constData());
+			PropVariantClear(&value);
+			props->Release();
+		}
 	}
 
 	enumerator->Release();
-
-	if (!opened || !device)
-		return false;
 
 	IAudioClient *client = nullptr;
 	if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void **)&client))) {
@@ -560,6 +639,8 @@ bool VoiceEngine::OpenCapture(const QString &deviceId, void **outDevice, void **
 		return false;
 	}
 
+	/* Ask WASAPI to convert to 16 kHz mono float. If the device refuses, fall
+	   back to its mix format and resample ourselves. */
 	WAVEFORMATEX format = {};
 	format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
 	format.nChannels = 1;
@@ -568,8 +649,39 @@ bool VoiceEngine::OpenCapture(const QString &deviceId, void **outDevice, void **
 	format.nBlockAlign = sizeof(float);
 	format.nAvgBytesPerSec = 16000 * sizeof(float);
 
-	const DWORD flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-	if (FAILED(client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10000000, 0, &format, nullptr))) {
+	DWORD flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+	if (loopback)
+		flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
+
+	HRESULT hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10000000, 0, &format, nullptr);
+
+	int sampleRate = 16000;
+	int channels = 1;
+
+	if (FAILED(hr)) {
+		WAVEFORMATEX *mixFormat = nullptr;
+		if (FAILED(client->GetMixFormat(&mixFormat)) || !mixFormat) {
+			client->Release();
+			device->Release();
+			return false;
+		}
+
+		if (mixFormat->wBitsPerSample != 32 ||
+		    mixFormat->wFormatTag != WAVE_FORMAT_IEEE_FLOAT) {
+			/* Only float32 mix formats are handled; most Windows devices use them. */
+			CoTaskMemFree(mixFormat);
+			client->Release();
+			device->Release();
+			return false;
+		}
+
+		sampleRate = (int)mixFormat->nSamplesPerSec;
+		channels = (int)mixFormat->nChannels;
+		hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10000000, 0, mixFormat, nullptr);
+		CoTaskMemFree(mixFormat);
+	}
+
+	if (FAILED(hr)) {
 		client->Release();
 		device->Release();
 		return false;
@@ -592,38 +704,91 @@ bool VoiceEngine::OpenCapture(const QString &deviceId, void **outDevice, void **
 	*outDevice = device;
 	*outClient = client;
 	*outCapture = capture;
-	*outSampleRate = 16000;
+	*outSampleRate = sampleRate;
+
+	m_sampleRate = sampleRate;
+	m_channels = channels;
+	m_phase = 0.0;
+	m_lastSample = 0.0f;
+
 	return true;
 }
 
-void VoiceEngine::Feed(const float *data, size_t frames)
+void VoiceEngine::Feed(const float *data, size_t frames, int channels)
 {
+	if (channels < 1)
+		channels = 1;
+
+	/* Downmix to mono. */
+	std::vector<float> mono(frames);
+	for (size_t i = 0; i < frames; i++) {
+		float sum = 0.0f;
+		for (int c = 0; c < channels; c++)
+			sum += data[i * (size_t)channels + c];
+		mono[i] = sum / channels;
+	}
+
+	/* Linear resample to 16 kHz, keeping phase across packets. */
+	std::vector<float> pcm16k;
+	if (m_sampleRate == 16000) {
+		pcm16k = std::move(mono);
+	} else {
+		const double ratio = 16000.0 / (double)m_sampleRate;
+		const size_t outCount = (size_t)((mono.size() + m_phase) * ratio);
+		pcm16k.resize(outCount);
+
+		for (size_t i = 0; i < outCount; i++) {
+			const double pos = (double)i / ratio - m_phase;
+			const size_t i0 = (size_t)pos;
+			const double frac = pos - i0;
+			const float a = i0 < mono.size() ? mono[i0] : m_lastSample;
+			const float b = (i0 + 1) < mono.size() ? mono[i0 + 1] : a;
+			pcm16k[i] = (float)(a * (1.0 - frac) + b * frac);
+		}
+		m_phase = (double)outCount / ratio - (double)mono.size() + m_phase;
+		if (!mono.empty())
+			m_lastSample = mono.back();
+	}
+
 	const size_t frameSize = 320; /* 20 ms at 16 kHz */
+
+	/* Packets are often shorter than one analysis frame (10 ms), so keep the
+	   remainder instead of dropping it. */
+	m_residual.insert(m_residual.end(), pcm16k.begin(), pcm16k.end());
+
 	size_t offset = 0;
 
-	while (offset + frameSize <= frames) {
+	while (offset + frameSize <= m_residual.size()) {
 		double sum = 0.0;
 		for (size_t i = 0; i < frameSize; i++) {
-			const double v = data[offset + i];
+			const double v = m_residual[offset + i];
 			sum += v * v;
 		}
 		const double rms = std::sqrt(sum / frameSize);
-
 		const double threshold = std::max(0.0035, m_noiseFloor * 2.5 * m_sensitivity);
 
+		/* Keep a 300 ms history so the start of a short phrase is not lost. */
 		if (!m_inSpeech) {
+			m_history.insert(m_history.end(), m_residual.begin() + (long)offset,
+					 m_residual.begin() + (long)(offset + frameSize));
+			if (m_history.size() > 4800)
+				m_history.erase(m_history.begin(), m_history.begin() + (long)(m_history.size() - 4800));
+
 			if (rms > threshold) {
 				m_inSpeech = true;
 				m_silenceMs = 0;
-				m_segment.clear();
+				m_segment = m_history;
+				blog(LOG_DEBUG, "[AkvariumVoice] speech start (rms %.4f, threshold %.4f)", rms, threshold);
 			} else {
-				/* Track ambient noise while nobody speaks. */
 				m_noiseFloor = 0.98 * m_noiseFloor + 0.02 * std::min(rms, 0.05);
 			}
 		}
 
 		if (m_inSpeech) {
-			m_segment.insert(m_segment.end(), data + offset, data + offset + frameSize);
+			if (m_segment.size() < 16000 * 6) {
+				m_segment.insert(m_segment.end(), m_residual.begin() + (long)offset,
+						 m_residual.begin() + (long)(offset + frameSize));
+			}
 
 			if (rms <= threshold * 0.8)
 				m_silenceMs += 20;
@@ -636,6 +801,9 @@ void VoiceEngine::Feed(const float *data, size_t frames)
 
 		offset += frameSize;
 	}
+
+	if (offset > 0)
+		m_residual.erase(m_residual.begin(), m_residual.begin() + (long)offset);
 }
 
 void VoiceEngine::FinalizeSegment(std::vector<float> &segment)
@@ -643,6 +811,7 @@ void VoiceEngine::FinalizeSegment(std::vector<float> &segment)
 	const size_t minSamples = 16000 * 3 / 10; /* 300 ms */
 
 	if (segment.size() >= minSamples && segment.size() <= 16000 * 6) {
+		blog(LOG_DEBUG, "[AkvariumVoice] speech segment %.2f s", (double)segment.size() / 16000.0);
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_pending = segment;
 		m_hasPending = true;
@@ -717,6 +886,8 @@ void VoiceEngine::InferenceLoop()
 		}
 		text = text.trimmed();
 
+		blog(LOG_INFO, "[AkvariumVoice] heard: '%s'", text.toUtf8().constData());
+
 		if (text.isEmpty())
 			continue;
 
@@ -740,6 +911,8 @@ void VoiceEngine::HandleTranscript(const QString &text)
 			break;
 		}
 	}
+
+	blog(LOG_INFO, "[AkvariumVoice] match: %s", matched ? matchedPhrase.toUtf8().constData() : "none");
 
 	if (matched)
 		emit Triggered(matchedPhrase, text);

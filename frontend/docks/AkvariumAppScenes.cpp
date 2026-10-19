@@ -92,6 +92,13 @@ void AppSceneEngine::Init(OBSBasic *main)
 	engine->Load();
 	engine->m_timer.start();
 
+	obs_frontend_add_event_callback(
+		[](enum obs_frontend_event event, void *) {
+			if (event == OBS_FRONTEND_EVENT_EXIT && engine)
+				engine->m_timer.stop();
+		},
+		nullptr);
+
 	auto *dock = new AppSceneDock(main);
 	main->AddDockWidget(dock, Qt::RightDockWidgetArea);
 }
@@ -408,6 +415,8 @@ AppSceneDock::AppSceneDock(QWidget *parent) : QDockWidget(QStringLiteral("Scene 
 	m_table->setHorizontalHeaderLabels({QStringLiteral("Application"), QStringLiteral("Condition"),
 					    QStringLiteral("Scene")});
 	m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+	/* No row numbers: that header paints an unstyled white corner square on dark themes. */
+	m_table->verticalHeader()->setVisible(false);
 	m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
 	m_table->setSelectionMode(QAbstractItemView::SingleSelection);
 	m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);

@@ -83,12 +83,13 @@ private:
 
 	void CaptureLoop();
 	void InferenceLoop();
-	bool OpenCapture(const QString &deviceId, void **device, void **client, void **capture,
+	bool OpenCapture(const QString &deviceSpec, void **device, void **client, void **capture,
 			 int *sampleRate);
-	void Feed(const float *data, size_t frames);
+	void Feed(const float *data, size_t frames, int channels);
+	void Shutdown();
 	void FinalizeSegment(std::vector<float> &segment);
 	void HandleTranscript(const QString &text);
-	QString ResolveDeviceId() const;
+	QString ResolveDeviceSpec() const;
 
 	OBSBasic *m_main = nullptr;
 
@@ -103,7 +104,18 @@ private:
 	whisper_context *m_ctx = nullptr;
 	QString m_modelLoaded;
 
+	/* Capture format / resampler state (capture thread only) */
+	int m_sampleRate = 16000;
+	int m_channels = 1;
+	double m_phase = 0.0;
+	double m_peakWindow = 0.0;
+	size_t m_framesWindow = 0;
+	float m_lastSample = 0.0f;
+	bool m_loopback = false;
+
 	/* VAD state (capture thread only) */
+	std::vector<float> m_residual;
+	std::vector<float> m_history;
 	std::vector<float> m_segment;
 	double m_noiseFloor = 0.0015;
 	int m_silenceMs = 0;
