@@ -35,6 +35,8 @@
 !COPYING
 !INSTALL
 !README.rst
+!README.md
+!README.AkvariumOBS.md
 
 # Exclude lock files
 *.lock.json
