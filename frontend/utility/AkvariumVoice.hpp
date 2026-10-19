@@ -57,6 +57,10 @@ public:
 	static QString ModelUrl(const QString &model);
 	static bool ModelReady(const QString &model);
 
+	/* Offline self-test: recognise a WAV file and match it against phrases.
+	   Returns the matched phrase (empty if none) and fills transcriptOut. */
+	static QString TestRecognize(const QString &wavPath, const QStringList &phrases, QString *transcriptOut);
+
 	void Apply();
 	void Stop();
 	void ReapplyConfig();

@@ -631,15 +631,16 @@ void OBSBasic::on_scenes_customContextMenuRequested(const QPoint &pos)
 			popup.addSeparator();
 
 			QAction *rememberAudio =
-				popup.addAction(QStringLiteral("Запоминать громкость и mute для этой сцены"));
+				popup.addAction(QStringLiteral("Remember volume and mute for this scene"));
 			rememberAudio->setCheckable(true);
 			rememberAudio->setChecked(akvarium::SceneAudioState::SceneEnabled(clickedSource));
 			connect(rememberAudio, &QAction::toggled, this, [clickedSource](bool enabled) {
 				akvarium::SceneAudioState::SetSceneEnabled(clickedSource, enabled);
+				obs_frontend_save();
 			});
 
 			QAction *captureAudio =
-				popup.addAction(QStringLiteral("Запомнить текущее аудио-состояние сцены"));
+				popup.addAction(QStringLiteral("Capture current audio state for this scene"));
 			connect(captureAudio, &QAction::triggered, this,
 				[clickedSource]() { akvarium::SceneAudioState::SaveSceneState(clickedSource, true); });
 		}

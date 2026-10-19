@@ -9,10 +9,11 @@
 
 #include "AkvariumAppScenes.hpp"
 
-#include "OBSBasic.hpp"
-#include "OBSApp.hpp"
+#include <widgets/OBSBasic.hpp>
+#include <OBSApp.hpp>
 
 #include <obs-frontend-api.h>
+#include <obs-module.h>
 #include <obs-module.h>
 #include <util/platform.h>
 
@@ -65,13 +66,13 @@ QString AppSceneEngine::ConditionLabel(int condition)
 {
 	switch (static_cast<AppCondition>(condition)) {
 	case AppCondition::Foreground:
-		return QStringLiteral("В фокусе");
+		return QStringLiteral("In foreground");
 	case AppCondition::Running:
-		return QStringLiteral("Запущено (фон или фокус)");
+		return QStringLiteral("Running (foreground or background)");
 	case AppCondition::RunningNotForeground:
-		return QStringLiteral("Запущено, но не в фокусе");
+		return QStringLiteral("Running but not in foreground");
 	case AppCondition::NotRunning:
-		return QStringLiteral("Не запущено (закрыто)");
+		return QStringLiteral("Not running (closed)");
 	}
 	return QStringLiteral("?");
 }
@@ -250,7 +251,9 @@ void AppSceneEngine::Tick()
 			ok = isRunning && !isForeground;
 			break;
 		case AppCondition::NotRunning:
-			ok = !isRunning && !isForeground;
+			/* "Not running" must only depend on the process list: the rule's
+			   exe can never be the foreground window if it is not running. */
+			ok = !isRunning;
 			break;
 		}
 
@@ -261,16 +264,20 @@ void AppSceneEngine::Tick()
 	}
 
 	if (matched != m_lastRule) {
+		blog(LOG_INFO, "[AkvariumAppScenes] rule %d matched (prev %d), foreground '%s'", matched,
+		     m_lastRule, foreground.toUtf8().constData());
 		m_lastRule = matched;
 		if (matched >= 0)
 			ApplyRule(matched);
 
 		QString status;
 		if (matched >= 0) {
-			status = QStringLiteral("%1 → %2").arg(m_rules.at(matched).exe,
-							       m_rules.at(matched).sceneName);
+			status = QStringLiteral("%1 -> %2  (foreground: %3)")
+					 .arg(m_rules.at(matched).exe, m_rules.at(matched).sceneName,
+					      foreground.isEmpty() ? QStringLiteral("-") : foreground);
 		} else {
-			status = QStringLiteral("Нет активного правила");
+			status = QStringLiteral("No active rule  (foreground: %1)")
+					 .arg(foreground.isEmpty() ? QStringLiteral("-") : foreground);
 		}
 		if (m_status != status) {
 			m_status = status;
@@ -293,9 +300,14 @@ void AppSceneEngine::ApplyRule(int index)
 	if (!scene && !rule.sceneName.isEmpty())
 		scene = obs_get_source_by_name(rule.sceneName.toUtf8().constData());
 
-	if (!scene)
+	if (!scene) {
+		blog(LOG_WARNING, "[AkvariumAppScenes] scene '%s' not found for rule '%s'",
+		     rule.sceneName.toUtf8().constData(), rule.exe.toUtf8().constData());
 		return;
+	}
 
+	blog(LOG_INFO, "[AkvariumAppScenes] switching to scene '%s' for app '%s'",
+	     obs_source_get_name(scene), rule.exe.toUtf8().constData());
 	obs_frontend_set_current_scene(scene);
 	obs_source_release(scene);
 }
@@ -306,7 +318,7 @@ void AppSceneEngine::ApplyRule(int index)
 
 AppSceneRuleDialog::AppSceneRuleDialog(QWidget *parent, const AppSceneRule &rule) : QDialog(parent)
 {
-	setWindowTitle(rule.exe.isEmpty() ? QStringLiteral("Новое правило") : QStringLiteral("Правило"));
+	setWindowTitle(rule.exe.isEmpty() ? QStringLiteral("New rule") : QStringLiteral("Rule"));
 
 	auto *form = new QFormLayout(this);
 
@@ -315,13 +327,13 @@ AppSceneRuleDialog::AppSceneRuleDialog(QWidget *parent, const AppSceneRule &rule
 	m_exe->setInsertPolicy(QComboBox::NoInsert);
 	PopulateProcesses();
 	m_exe->setCurrentText(rule.exe);
-	form->addRow(QStringLiteral("Приложение (exe):"), m_exe);
+	form->addRow(QStringLiteral("Application (exe):"), m_exe);
 
 	m_condition = new QComboBox(this);
 	for (int i = 0; i <= 3; i++)
 		m_condition->addItem(AppSceneEngine::ConditionLabel(i), i);
 	m_condition->setCurrentIndex(std::clamp(rule.condition, 0, 3));
-	form->addRow(QStringLiteral("Условие:"), m_condition);
+	form->addRow(QStringLiteral("Condition:"), m_condition);
 
 	m_scene = new QComboBox(this);
 	obs_frontend_source_list scenes = {};
@@ -337,7 +349,7 @@ AppSceneRuleDialog::AppSceneRuleDialog(QWidget *parent, const AppSceneRule &rule
 			m_scene->setCurrentIndex(m_scene->count() - 1);
 	}
 	obs_frontend_source_list_free(&scenes);
-	form->addRow(QStringLiteral("Сцена:"), m_scene);
+	form->addRow(QStringLiteral("Scene:"), m_scene);
 
 	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
 	connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
@@ -384,7 +396,7 @@ AppSceneRule AppSceneRuleDialog::Rule() const
 /* Dock                                                                      */
 /* ------------------------------------------------------------------------- */
 
-AppSceneDock::AppSceneDock(QWidget *parent) : QDockWidget(QStringLiteral("Привязка сцен к приложениям"), parent)
+AppSceneDock::AppSceneDock(QWidget *parent) : QDockWidget(QStringLiteral("Scene Binding to Applications"), parent)
 {
 	setObjectName(QStringLiteral("akvariumAppScenesDock"));
 
@@ -393,8 +405,8 @@ AppSceneDock::AppSceneDock(QWidget *parent) : QDockWidget(QStringLiteral("При
 
 	m_table = new QTableWidget(body);
 	m_table->setColumnCount(3);
-	m_table->setHorizontalHeaderLabels({QStringLiteral("Приложение"), QStringLiteral("Условие"),
-					    QStringLiteral("Сцена")});
+	m_table->setHorizontalHeaderLabels({QStringLiteral("Application"), QStringLiteral("Condition"),
+					    QStringLiteral("Scene")});
 	m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
 	m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
 	m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -402,11 +414,11 @@ AppSceneDock::AppSceneDock(QWidget *parent) : QDockWidget(QStringLiteral("При
 	layout->addWidget(m_table);
 
 	auto *buttons = new QHBoxLayout();
-	auto *add = new QPushButton(QStringLiteral("Добавить"), body);
-	auto *edit = new QPushButton(QStringLiteral("Изменить"), body);
-	auto *remove = new QPushButton(QStringLiteral("Удалить"), body);
-	auto *up = new QPushButton(QStringLiteral("Вверх"), body);
-	auto *down = new QPushButton(QStringLiteral("Вниз"), body);
+	auto *add = new QPushButton(QStringLiteral("Add"), body);
+	auto *edit = new QPushButton(QStringLiteral("Edit"), body);
+	auto *remove = new QPushButton(QStringLiteral("Remove"), body);
+	auto *up = new QPushButton(QStringLiteral("Up"), body);
+	auto *down = new QPushButton(QStringLiteral("Down"), body);
 	buttons->addWidget(add);
 	buttons->addWidget(edit);
 	buttons->addWidget(remove);
@@ -415,7 +427,7 @@ AppSceneDock::AppSceneDock(QWidget *parent) : QDockWidget(QStringLiteral("При
 	buttons->addStretch(1);
 	layout->addLayout(buttons);
 
-	m_status = new QLabel(QStringLiteral("Нет активного правила"), body);
+	m_status = new QLabel(QStringLiteral("No active rule"), body);
 	m_status->setWordWrap(true);
 	layout->addWidget(m_status);
 
@@ -450,7 +462,7 @@ AppSceneDock::AppSceneDock(QWidget *parent) : QDockWidget(QStringLiteral("При
 	if (auto *engine = AppSceneEngine::Instance()) {
 		connect(engine, &AppSceneEngine::RulesChanged, this, &AppSceneDock::Refresh);
 		connect(engine, &AppSceneEngine::StatusChanged, this, [this](const QString &status) {
-			m_status->setText(status.isEmpty() ? QStringLiteral("Нет активного правила") : status);
+			m_status->setText(status.isEmpty() ? QStringLiteral("No active rule") : status);
 		});
 	}
 

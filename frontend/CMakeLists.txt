@@ -23,6 +23,15 @@ if(NOT TARGET whisper)
   add_subdirectory("${CMAKE_SOURCE_DIR}/deps/whisper.cpp" whisper_cpp EXCLUDE_FROM_ALL)
 endif()
 
+# whisper.cpp is third-party C code; OBS builds with /WX, so relax warnings there.
+if(MSVC)
+  foreach(_whisper_target IN ITEMS whisper ggml ggml-base ggml-cpu ggml-blas ggml-vulkan)
+    if(TARGET ${_whisper_target})
+      target_compile_options(${_whisper_target} PRIVATE /WX- /W0)
+    endif()
+  endforeach()
+endif()
+
 if(NOT TARGET OBS::json11)
   add_subdirectory("${CMAKE_SOURCE_DIR}/deps/json11" json11)
 endif()
@@ -125,3 +134,20 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Header Files" FILES ${ta
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Qt Files" FILES ${target_qt_sources})
 
 set_target_properties_obs(obs-studio PROPERTIES FOLDER frontend OUTPUT_NAME "$<IF:$<PLATFORM_ID:Windows>,AkvariumOBS,akvariumobs>")
+
+# AkvariumOBS: offline recognition self-test tool (not part of the default build).
+if(TARGET whisper AND TARGET Qt::Core)
+  add_executable(akvarium-voice-selftest EXCLUDE_FROM_ALL "${CMAKE_SOURCE_DIR}/tools/akvarium-voice-selftest.cpp")
+  target_include_directories(akvarium-voice-selftest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(akvarium-voice-selftest PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+  target_link_libraries(akvarium-voice-selftest PRIVATE whisper Qt::Core)
+  set_target_properties_obs(akvarium-voice-selftest PROPERTIES FOLDER tools)
+endif()
+
+if(TARGET Qt::Core)
+  add_executable(akvarium-phrase-match-test EXCLUDE_FROM_ALL "${CMAKE_SOURCE_DIR}/tools/phrase-match-test.cpp")
+  target_include_directories(akvarium-phrase-match-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(akvarium-phrase-match-test PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+  target_link_libraries(akvarium-phrase-match-test PRIVATE Qt::Core)
+  set_target_properties_obs(akvarium-phrase-match-test PROPERTIES FOLDER tools)
+endif()

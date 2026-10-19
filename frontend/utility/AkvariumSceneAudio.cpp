@@ -10,46 +10,70 @@
 #include "AkvariumSceneAudio.hpp"
 
 #include <obs-frontend-api.h>
+#include <obs-module.h>
 #include <obs.h>
 #include <util/threading.h>
 
 #include <QVector>
 
+#include <algorithm>
 #include <vector>
+#include <utility>
 
 namespace akvarium {
 
 static SceneAudioState *instance = nullptr;
+bool SceneAudioState::applying = false;
 
-static void collect_scene_audio(obs_scene_t *scene, std::vector<OBSSource> &out)
+/* AkvariumOBS: the audio mixer lists every audio source, and global sources
+   (Mic/Aux, Desktop Audio) are not scene items. A per-scene mixer state must
+   therefore cover all audio sources of the collection, not just scene items. */
+struct CollectCtx {
+	std::vector<OBSSource> *out;
+	std::vector<obs_source_t *> *seen;
+};
+
+static void add_audio_source(CollectCtx &ctx, obs_source_t *source)
 {
-	if (!scene)
+	if (!source)
 		return;
 
-	obs_scene_enum_items(
-		scene,
-		[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
-			auto *list = static_cast<std::vector<OBSSource> *>(param);
-			obs_source_t *source = obs_sceneitem_get_source(item);
+	const char *id = obs_source_get_id(source);
+	if (id && (strcmp(id, "scene") == 0 || strcmp(id, "group") == 0))
+		return;
 
-			if (!source)
-				return true;
+	if ((obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO) == 0)
+		return;
 
-			const char *id = obs_source_get_id(source);
-			if (id && (strcmp(id, "group") == 0 || strcmp(id, "scene") == 0)) {
-				obs_scene_t *child = obs_scene_from_source(source);
-				if (child)
-					collect_scene_audio(child, *list);
-			}
+	if (std::find(ctx.seen->begin(), ctx.seen->end(), source) != ctx.seen->end())
+		return;
 
-			if ((obs_source_get_output_flags(source) & OBS_SOURCE_AUDIO) != 0)
-				list->emplace_back(OBSGetStrongRef(source));
+	ctx.seen->push_back(source);
+	ctx.out->emplace_back(OBSSource(source));
+}
 
+/* AkvariumOBS: the mixer shows every audio source. Global devices (Mic/Aux,
+   Desktop Audio) are private sources living in mixer output channels, so they
+   must be collected separately from the regular source enumeration. */
+static void collect_audio_sources(std::vector<OBSSource> &out)
+{
+	std::vector<obs_source_t *> seen;
+	CollectCtx ctx{&out, &seen};
+
+	for (int channel = 1; channel < 7; channel++) {
+		obs_source_t *source = obs_get_output_source(channel);
+		if (source) {
+			add_audio_source(ctx, source);
+			obs_source_release(source);
+		}
+	}
+
+	obs_enum_sources(
+		[](void *param, obs_source_t *source) {
+			add_audio_source(*static_cast<CollectCtx *>(param), source);
 			return true;
 		},
-		&out);
-
-	/* obs_scene_enum_items returns items in reverse order; order is irrelevant here. */
+		&ctx);
 }
 
 SceneAudioState::SceneAudioState(OBSBasic *main_) : main(main_)
@@ -66,6 +90,7 @@ void SceneAudioState::Init(OBSBasic *main)
 
 	instance = new SceneAudioState(main);
 	obs_frontend_add_event_callback(frontend_event_cb, instance);
+	blog(LOG_INFO, "[AkvariumSceneAudio] initialized");
 }
 
 SceneAudioState *SceneAudioState::Instance()
@@ -103,17 +128,21 @@ void SceneAudioState::ScheduleSave()
 	if (applying)
 		return;
 
+	/* Remember which scene the change belongs to: the user may switch scenes
+	   before the debounce fires, and the state must go to the right scene. */
+	obs_source_t *current = obs_frontend_get_current_scene();
+	pendingScene = current;
+	if (current)
+		obs_source_release(current);
+
 	if (!saveTimer.isActive())
 		saveTimer.start();
 }
 
 void SceneAudioState::SaveCurrentNow()
 {
-	obs_source_t *current = obs_frontend_get_current_scene();
-	if (current) {
-		SaveSceneState(current);
-		obs_source_release(current);
-	}
+	if (pendingScene)
+		SaveSceneState(pendingScene.Get());
 }
 
 void SceneAudioState::FrontendEvent(obs_frontend_event event)
@@ -122,9 +151,17 @@ void SceneAudioState::FrontendEvent(obs_frontend_event event)
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED: {
 		obs_source_t *current = obs_frontend_get_current_scene();
-		lastScene = OBSGetStrongRef(current);
-		if (current)
+		lastScene = current;
+
+		std::vector<OBSSource> sources;
+		collect_audio_sources(sources);
+		for (OBSSource &source : sources)
+			ConnectSource(source.Get());
+
+		if (current) {
+			ApplySceneState(current);
 			obs_source_release(current);
+		}
 		break;
 	}
 
@@ -134,6 +171,9 @@ void SceneAudioState::FrontendEvent(obs_frontend_event event)
 		if (!current)
 			break;
 
+		blog(LOG_INFO, "[AkvariumSceneAudio] scene changed: '%s' -> '%s'",
+		     lastScene ? obs_source_get_name(lastScene.Get()) : "(none)", obs_source_get_name(current));
+
 		/* Freeze the outgoing scene's mixer state before applying the new one. */
 		if (lastScene && lastScene.Get() != current)
 			SaveSceneState(lastScene.Get(), false);
@@ -141,11 +181,11 @@ void SceneAudioState::FrontendEvent(obs_frontend_event event)
 		ApplySceneState(current);
 
 		std::vector<OBSSource> sources;
-		collect_scene_audio(obs_scene_from_source(current), sources);
+		collect_audio_sources(sources);
 		for (OBSSource &source : sources)
 			ConnectSource(source.Get());
 
-		lastScene = OBSGetStrongRef(current);
+		lastScene = current;
 		obs_source_release(current);
 		break;
 	}
@@ -230,7 +270,7 @@ void SceneAudioState::SaveSceneState(obs_source_t *sceneSource, bool force)
 		return;
 
 	std::vector<OBSSource> sources;
-	collect_scene_audio(scene, sources);
+	collect_audio_sources(sources);
 	if (sources.empty())
 		return;
 
@@ -238,7 +278,7 @@ void SceneAudioState::SaveSceneState(obs_source_t *sceneSource, bool force)
 	if (!state)
 		return;
 
-	obs_data_t *items = obs_data_create();
+	obs_data_array_t *items = obs_data_array_create();
 
 	for (OBSSource &source : sources) {
 		const char *uuid = obs_source_get_uuid(source.Get());
@@ -246,18 +286,23 @@ void SceneAudioState::SaveSceneState(obs_source_t *sceneSource, bool force)
 			continue;
 
 		obs_data_t *entry = obs_data_create();
+		obs_data_set_string(entry, "uuid", uuid);
+		obs_data_set_string(entry, "name", obs_source_get_name(source.Get()));
 		obs_data_set_bool(entry, "mute", obs_source_muted(source.Get()));
 		obs_data_set_double(entry, "volume", obs_source_get_volume(source.Get()));
-		obs_data_set_obj(items, uuid, entry);
+		obs_data_array_push_back(items, entry);
 		obs_data_release(entry);
 	}
 
-	obs_data_set_obj(state, "items", items);
+	obs_data_set_array(state, "items", items);
 	obs_data_set_bool(state, "enabled", SceneEnabled(sceneSource));
 
 	obs_scene_set_audio_state(scene, state);
-	obs_data_release(items);
+	obs_data_array_release(items);
 	obs_data_release(state);
+
+	blog(LOG_INFO, "[AkvariumSceneAudio] saved %d audio sources for scene '%s'", (int)sources.size(),
+	     obs_source_get_name(sceneSource));
 }
 
 void SceneAudioState::ApplySceneState(obs_source_t *sceneSource)
@@ -276,28 +321,71 @@ void SceneAudioState::ApplySceneState(obs_source_t *sceneSource)
 	if (!state)
 		return;
 
-	obs_data_t *items = obs_data_get_obj(state, "items");
+	obs_data_array_t *items = obs_data_get_array(state, "items");
+	blog(LOG_INFO, "[AkvariumSceneAudio] applying state for scene '%s'", obs_source_get_name(sceneSource));
+
 	if (items) {
+		/* Resolve against live sources: global audio devices are private
+		   sources and cannot be found through obs_get_source_by_uuid. */
+		std::vector<OBSSource> live;
+		collect_audio_sources(live);
+
+		std::vector<std::pair<QString, obs_source_t *>> byUuid;
+		std::vector<std::pair<QString, obs_source_t *>> byName;
+		for (OBSSource &source : live) {
+			const char *uuid = obs_source_get_uuid(source.Get());
+			const char *name = obs_source_get_name(source.Get());
+			if (uuid)
+				byUuid.emplace_back(QString::fromUtf8(uuid), source.Get());
+			if (name)
+				byName.emplace_back(QString::fromUtf8(name), source.Get());
+		}
+
+		const size_t count = obs_data_array_count(items);
+		blog(LOG_INFO, "[AkvariumSceneAudio]  %d stored entries, %d live sources", (int)count, (int)live.size());
+
 		applying = true;
 
-		for (obs_data_item_t *entry = obs_data_first(items); entry; obs_data_item_next(&entry)) {
-			const char *uuid = obs_data_item_get_name(entry);
-			obs_data_t *item = obs_data_item_get_obj(entry);
-			if (!uuid || !item)
+		for (size_t i = 0; i < count; i++) {
+			obs_data_t *item = obs_data_array_item(items, i);
+			if (!item)
 				continue;
 
-			obs_source_t *source = obs_get_source_by_uuid(uuid);
+			const QString uuid = QString::fromUtf8(obs_data_get_string(item, "uuid"));
+			const QString name = QString::fromUtf8(obs_data_get_string(item, "name"));
+
+			obs_source_t *source = nullptr;
+			for (auto &pair : byUuid) {
+				if (pair.first == uuid) {
+					source = pair.second;
+					break;
+				}
+			}
+			if (!source) {
+				for (auto &pair : byName) {
+					if (pair.first == name) {
+						source = pair.second;
+						break;
+					}
+				}
+			}
+
 			if (source) {
-				obs_source_set_muted(source, obs_data_get_bool(item, "mute"));
-				obs_source_set_volume(source, (float)obs_data_get_double(item, "volume"));
-				obs_source_release(source);
+				const bool muted = obs_data_get_bool(item, "mute");
+				const float volume = (float)obs_data_get_double(item, "volume");
+				obs_source_set_muted(source, muted);
+				obs_source_set_volume(source, volume);
+				blog(LOG_INFO, "[AkvariumSceneAudio]  restore '%s' muted=%d vol=%.3f",
+				     obs_source_get_name(source), (int)muted, volume);
+			} else {
+				blog(LOG_INFO, "[AkvariumSceneAudio]  skip '%s' (source gone)", name.toUtf8().constData());
 			}
 
 			obs_data_release(item);
 		}
 
 		applying = false;
-		obs_data_release(items);
+		obs_data_array_release(items);
 	}
 
 	obs_data_release(state);

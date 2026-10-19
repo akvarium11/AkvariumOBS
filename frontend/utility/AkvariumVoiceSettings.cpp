@@ -29,32 +29,32 @@
 namespace akvarium {
 
 VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
-	: QGroupBox(QStringLiteral("Голосовые команды (Replay Buffer)"), parent)
+	: QGroupBox(QStringLiteral("Voice Commands (Replay Buffer)"), parent)
 {
 	setCheckable(false);
 
 	auto *layout = new QVBoxLayout(this);
 
-	m_enabled = new QCheckBox(QStringLiteral("Включить голосовые команды"), this);
+	m_enabled = new QCheckBox(QStringLiteral("Enable voice commands"), this);
 	layout->addWidget(m_enabled);
 
 	auto *form = new QFormLayout();
 	form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
 	m_phrases = new QPlainTextEdit(this);
-	m_phrases->setPlaceholderText(QStringLiteral("Одна фраза на строку, на английском или русском.\n"
-						     "Например:\nсделай реплей\nsave replay"));
+	m_phrases->setPlaceholderText(QStringLiteral("One phrase per line, English or Russian.\n"
+						     "For example:\nsave replay\nсделай реплей"));
 	m_phrases->setFixedHeight(90);
-	form->addRow(QStringLiteral("Фразы:"), m_phrases);
+	form->addRow(QStringLiteral("Phrases:"), m_phrases);
 
 	m_model = new QComboBox(this);
-	m_model->addItem(QStringLiteral("tiny — самый лёгкий (~75 МБ)"), QStringLiteral("tiny"));
-	m_model->addItem(QStringLiteral("base — баланс (~142 МБ)"), QStringLiteral("base"));
-	m_model->addItem(QStringLiteral("small — точнее, тяжелее (~466 МБ)"), QStringLiteral("small"));
-	form->addRow(QStringLiteral("Модель распознавания:"), m_model);
+	m_model->addItem(QStringLiteral("tiny - lightest (~75 MB)"), QStringLiteral("tiny"));
+	m_model->addItem(QStringLiteral("base - balanced (~142 MB)"), QStringLiteral("base"));
+	m_model->addItem(QStringLiteral("small - more accurate, heavier (~466 MB)"), QStringLiteral("small"));
+	form->addRow(QStringLiteral("Recognition model:"), m_model);
 
 	auto *modelRow = new QHBoxLayout();
-	m_download = new QPushButton(QStringLiteral("Скачать / проверить модель"), this);
+	m_download = new QPushButton(QStringLiteral("Download / verify model"), this);
 	m_progress = new QProgressBar(this);
 	m_progress->setRange(0, 100);
 	m_progress->setValue(0);
@@ -64,30 +64,30 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 	form->addRow(QString(), modelRow);
 
 	m_mic = new QComboBox(this);
-	form->addRow(QStringLiteral("Микрофон:"), m_mic);
+	form->addRow(QStringLiteral("Microphone:"), m_mic);
 
 	m_threads = new QSpinBox(this);
 	m_threads->setRange(1, 8);
-	m_threads->setToolTip(QStringLiteral("Сколько потоков CPU отдавать распознаванию. 2 — хороший баланс."));
-	form->addRow(QStringLiteral("Потоки CPU:"), m_threads);
+	m_threads->setToolTip(QStringLiteral("CPU threads used for recognition. 2 is a good balance."));
+	form->addRow(QStringLiteral("CPU threads:"), m_threads);
 
 	m_sensitivity = new QSlider(Qt::Horizontal, this);
 	m_sensitivity->setRange(50, 250);
 	m_sensitivity->setValue(100);
-	m_sensitivity->setToolTip(QStringLiteral("Порог срабатывания VAD. Выше — меньше ложных запусков, "
-						 "ниже — лучше ловит тихую речь."));
-	form->addRow(QStringLiteral("Чувствительность:"), m_sensitivity);
+	m_sensitivity->setToolTip(QStringLiteral("VAD threshold. Higher means fewer false triggers, "
+						 "lower catches quiet speech better."));
+	form->addRow(QStringLiteral("Sensitivity:"), m_sensitivity);
 
-	m_onlyReplayBuffer = new QCheckBox(QStringLiteral("Слушать только когда включён Replay Buffer"), this);
+	m_onlyReplayBuffer = new QCheckBox(QStringLiteral("Listen only while the Replay Buffer is running"), this);
 	form->addRow(QString(), m_onlyReplayBuffer);
 
 	m_status = new QLabel(this);
 	m_status->setWordWrap(true);
-	form->addRow(QStringLiteral("Статус:"), m_status);
+	form->addRow(QStringLiteral("Status:"), m_status);
 
 	m_transcript = new QLabel(this);
 	m_transcript->setWordWrap(true);
-	form->addRow(QStringLiteral("Последнее услышанное:"), m_transcript);
+	form->addRow(QStringLiteral("Last heard:"), m_transcript);
 
 	layout->addLayout(form);
 
@@ -101,18 +101,18 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 	connect(m_downloader, &VoiceModelDownloader::Finished, this, [this](bool ok, const QString &error) {
 		m_progress->setVisible(false);
 		m_download->setEnabled(true);
-		m_status->setText(ok ? QStringLiteral("Модель готова") : error);
+		m_status->setText(ok ? QStringLiteral("Model ready") : error);
 	});
 	connect(m_model, &QComboBox::currentIndexChanged, this, [this]() {
-		m_dirty = true;
+		MarkChanged();
 		UpdateStatus();
 	});
-	connect(m_enabled, &QCheckBox::toggled, this, [this]() { m_dirty = true; });
-	connect(m_onlyReplayBuffer, &QCheckBox::toggled, this, [this]() { m_dirty = true; });
-	connect(m_threads, &QSpinBox::valueChanged, this, [this]() { m_dirty = true; });
-	connect(m_sensitivity, &QSlider::valueChanged, this, [this]() { m_dirty = true; });
-	connect(m_phrases, &QPlainTextEdit::textChanged, this, [this]() { m_dirty = true; });
-	connect(m_mic, &QComboBox::currentIndexChanged, this, [this]() { m_dirty = true; });
+	connect(m_enabled, &QCheckBox::toggled, this, [this]() { MarkChanged(); });
+	connect(m_onlyReplayBuffer, &QCheckBox::toggled, this, [this]() { MarkChanged(); });
+	connect(m_threads, &QSpinBox::valueChanged, this, [this]() { MarkChanged(); });
+	connect(m_sensitivity, &QSlider::valueChanged, this, [this]() { MarkChanged(); });
+	connect(m_phrases, &QPlainTextEdit::textChanged, this, [this]() { MarkChanged(); });
+	connect(m_mic, &QComboBox::currentIndexChanged, this, [this]() { MarkChanged(); });
 
 	if (auto *engine = VoiceEngine::Instance()) {
 		connect(engine, &VoiceEngine::StatusChanged, this, [this]() { UpdateStatus(); }, Qt::QueuedConnection);
@@ -125,7 +125,7 @@ void VoiceCommandSettings::RefreshMics()
 {
 	m_mic->blockSignals(true);
 	m_mic->clear();
-	m_mic->addItem(QStringLiteral("Авто — активный микрофон текущей сцены"), QString());
+	m_mic->addItem(QStringLiteral("Auto - active microphone of the current scene"), QString());
 
 	obs_enum_sources(
 		[](void *param, obs_source_t *source) {
@@ -149,6 +149,7 @@ void VoiceCommandSettings::RefreshMics()
 
 void VoiceCommandSettings::Load()
 {
+	m_loading = true;
 	VoiceConfig cfg = VoiceEngine::LoadConfig();
 
 	m_enabled->setChecked(cfg.enabled);
@@ -163,7 +164,20 @@ void VoiceCommandSettings::Load()
 	m_mic->setCurrentIndex(micIndex >= 0 ? micIndex : 0);
 
 	m_dirty = false;
+	m_loading = false;
 	UpdateStatus();
+}
+
+void VoiceCommandSettings::MarkChanged()
+{
+	m_dirty = true;
+	if (!m_loading)
+		emit Changed();
+}
+
+void VoiceCommandSettings::SetLoading(bool loading)
+{
+	m_loading = loading;
 }
 
 void VoiceCommandSettings::Save()
@@ -197,15 +211,15 @@ void VoiceCommandSettings::UpdateStatus()
 
 	QString text;
 	if (!ready) {
-		text = QStringLiteral("Модель ggml-%1.bin не найдена — нажмите «Скачать».").arg(model);
+		text = QStringLiteral("Model ggml-%1.bin is missing - use Download.").arg(model);
 	} else if (auto *engine = VoiceEngine::Instance()) {
 		text = engine->StatusText();
 		if (text.isEmpty())
-			text = QStringLiteral("Готово");
+			text = QStringLiteral("Ready");
 		if (engine->Listening())
-			text += QStringLiteral("  (распознавание активно)");
+			text += QStringLiteral("  (listening)");
 	} else {
-		text = QStringLiteral("Готово");
+		text = QStringLiteral("Ready");
 	}
 
 	m_status->setText(text);
@@ -217,14 +231,14 @@ void VoiceCommandSettings::DownloadModel()
 {
 	const QString model = m_model->currentData().toString();
 	if (VoiceEngine::ModelReady(model)) {
-		m_status->setText(QStringLiteral("Модель уже скачана"));
+		m_status->setText(QStringLiteral("Model already downloaded"));
 		return;
 	}
 
 	m_download->setEnabled(false);
 	m_progress->setValue(0);
 	m_progress->setVisible(true);
-	m_status->setText(QStringLiteral("Загрузка модели ggml-%1.bin...").arg(model));
+	m_status->setText(QStringLiteral("Downloading model ggml-%1.bin...").arg(model));
 	m_downloader->Start(model);
 }
 

@@ -15,6 +15,7 @@
 #pragma once
 
 #include <obs.hpp>
+#include <obs-frontend-api.h>
 
 #include <QObject>
 #include <QSet>
@@ -59,8 +60,9 @@ private:
 
 	OBSBasic *main = nullptr;
 	OBSSource lastScene;
+	OBSSource pendingScene;
 	QTimer saveTimer;
-	bool applying = false;
+	static bool applying;
 	QSet<QString> connected;
 };
 

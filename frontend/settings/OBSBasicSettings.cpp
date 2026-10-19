@@ -357,6 +357,17 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	if (auto *advLayout = ui->advOutputReplayFrame->layout())
 		advLayout->addWidget(voiceAdv);
 
+	for (akvarium::VoiceCommandSettings *widget : {voiceSimple.data(), voiceAdv.data()}) {
+		if (!widget)
+			continue;
+		connect(widget, &akvarium::VoiceCommandSettings::Changed, this, [this]() {
+			if (loading)
+				return;
+			outputsChanged = true;
+			EnableApplyButton(true);
+		});
+	}
+
 	main->EnableOutputs(false);
 
 	ui->listWidget->setAttribute(Qt::WA_MacShowFocusRect, false);
@@ -3480,10 +3491,23 @@ void OBSBasicSettings::SaveEncoder(QComboBox *combo, const char *section, const 
 
 void OBSBasicSettings::SaveOutputSettings()
 {
-	if (voiceSimple)
-		voiceSimple->Save();
-	if (voiceAdv)
-		voiceAdv->Save();
+	/* The voice settings widget exists twice (simple and advanced output
+	   modes). Save the one the user actually edited, otherwise the stale
+	   copy would overwrite fresh values. */
+	akvarium::VoiceCommandSettings *voiceToSave = nullptr;
+	if (voiceSimple && voiceSimple->HasChanges())
+		voiceToSave = voiceSimple;
+	if (voiceAdv && voiceAdv->HasChanges())
+		voiceToSave = voiceAdv;
+	if (!voiceToSave)
+		voiceToSave = (voiceSimple && voiceSimple->isVisible()) ? voiceSimple.data() : voiceAdv.data();
+	if (voiceToSave) {
+		voiceToSave->Save();
+		if (voiceSimple && voiceSimple != voiceToSave)
+			voiceSimple->Load();
+		if (voiceAdv && voiceAdv != voiceToSave)
+			voiceAdv->Load();
+	}
 
 	config_set_string(main->Config(), "Output", "Mode", OutputModeFromIdx(ui->outputMode->currentIndex()));
 

@@ -36,7 +36,12 @@ public:
 
 	bool HasChanges() const { return m_dirty; }
 
+signals:
+	void Changed();
+
 private:
+	void MarkChanged();
+	void SetLoading(bool loading);
 	void RefreshMics();
 	void UpdateStatus();
 	void DownloadModel();
@@ -55,6 +60,7 @@ private:
 
 	VoiceModelDownloader *m_downloader = nullptr;
 	bool m_dirty = false;
+	bool m_loading = false;
 };
 
 } // namespace akvarium

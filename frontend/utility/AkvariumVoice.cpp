@@ -9,7 +9,9 @@
 
 #include "AkvariumVoice.hpp"
 
-#include "OBSApp.hpp"
+#include "AkvariumPhraseMatch.hpp"
+
+#include <OBSApp.hpp>
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -36,95 +38,6 @@ static const char *kConfigSection = "AkvariumVoice";
 /* ------------------------------------------------------------------------- */
 /* Helpers                                                                   */
 /* ------------------------------------------------------------------------- */
-
-static QString Normalize(QString text)
-{
-	text = text.toLower();
-	text.replace(QChar(0x0451), QChar(0x0435)); /* ё -> е */
-
-	QString out;
-	out.reserve(text.size());
-	bool space = true;
-	for (QChar ch : text) {
-		const ushort c = ch.unicode();
-		const bool wordChar = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c >= 0x0400 && c <= 0x04FF) ||
-				      ch.isLetter();
-		if (wordChar) {
-			out.append(ch);
-			space = false;
-		} else if (!space) {
-			out.append(QChar(' '));
-			space = true;
-		}
-	}
-	while (out.endsWith(QChar(' ')))
-		out.chop(1);
-	return out;
-}
-
-static int EditDistance(const QString &a, const QString &b)
-{
-	const int n = a.size();
-	const int m = b.size();
-	if (n == 0)
-		return m;
-	if (m == 0)
-		return n;
-
-	std::vector<int> prev(m + 1), cur(m + 1);
-	for (int j = 0; j <= m; j++)
-		prev[j] = j;
-
-	for (int i = 1; i <= n; i++) {
-		cur[0] = i;
-		for (int j = 1; j <= m; j++) {
-			const int cost = a.at(i - 1) == b.at(j - 1) ? 0 : 1;
-			cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost});
-		}
-		prev = cur;
-	}
-	return prev[m];
-}
-
-static bool WordMatches(const QString &heard, const QString &expected)
-{
-	if (heard == expected)
-		return true;
-	if (expected.size() <= 3)
-		return heard == expected;
-	const int tolerance = std::max(1, expected.size() / 4);
-	if (std::abs(heard.size() - expected.size()) > tolerance)
-		return false;
-	return EditDistance(heard, expected) <= tolerance;
-}
-
-/* All words of the phrase must appear, in order, inside the transcript. */
-static bool PhraseMatches(const QString &phrase, const QString &transcript)
-{
-	const QStringList want = Normalize(phrase).split(QChar(' '), Qt::SkipEmptyParts);
-	const QStringList got = Normalize(transcript).split(QChar(' '), Qt::SkipEmptyParts);
-	if (want.isEmpty() || got.isEmpty())
-		return false;
-
-	if (got.size() > want.size() * 3 + 4)
-		return false;
-
-	int index = 0;
-	for (const QString &word : want) {
-		bool found = false;
-		while (index < got.size()) {
-			if (WordMatches(got.at(index), word)) {
-				found = true;
-				index++;
-				break;
-			}
-			index++;
-		}
-		if (!found)
-			return false;
-	}
-	return true;
-}
 
 /* ------------------------------------------------------------------------- */
 /* Config                                                                    */
@@ -218,7 +131,7 @@ QString VoiceEngine::ModelPath(const QString &model)
 
 QString VoiceEngine::ModelUrl(const QString &model)
 {
-	return QStringLiteral("https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-%1.bin").arg(model);
+	return QStringLiteral("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-%1.bin").arg(model);
 }
 
 bool VoiceEngine::ModelReady(const QString &model)
@@ -228,6 +141,146 @@ bool VoiceEngine::ModelReady(const QString &model)
 		return false;
 
 	return os_file_exists(path.toUtf8().constData());
+}
+
+/* ------------------------------------------------------------------------- */
+/* Offline self-test                                                         */
+/* ------------------------------------------------------------------------- */
+
+static bool ReadWavMono16k(const QString &path, std::vector<float> &out)
+{
+	FILE *file = fopen(path.toUtf8().constData(), "rb");
+	if (!file)
+		return false;
+
+	char riff[12];
+	if (fread(riff, 1, 12, file) != 12 || memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0) {
+		fclose(file);
+		return false;
+	}
+
+	uint16_t channels = 1;
+	uint32_t rate = 16000;
+	uint16_t bits = 16;
+	bool haveFormat = false;
+
+	for (;;) {
+		char chunk[8];
+		if (fread(chunk, 1, 8, file) != 8)
+			break;
+
+		uint32_t size = 0;
+		memcpy(&size, chunk + 4, 4);
+
+		if (memcmp(chunk, "fmt ", 4) == 0) {
+			std::vector<unsigned char> fmt(size);
+			if (fread(fmt.data(), 1, size, file) != size)
+				break;
+			if (size >= 16) {
+				memcpy(&channels, fmt.data() + 2, 2);
+				memcpy(&rate, fmt.data() + 4, 4);
+				memcpy(&bits, fmt.data() + 14, 2);
+				haveFormat = true;
+			}
+		} else if (memcmp(chunk, "data", 4) == 0) {
+			if (!haveFormat || bits != 16)
+				break;
+
+			std::vector<int16_t> pcm(size / 2);
+			const size_t read = fread(pcm.data(), 2, pcm.size(), file);
+			pcm.resize(read);
+
+			std::vector<float> mono;
+			mono.reserve(pcm.size() / channels);
+			for (size_t i = 0; i + channels <= pcm.size(); i += channels) {
+				float sum = 0.0f;
+				for (uint16_t c = 0; c < channels; c++)
+					sum += pcm[i + c] / 32768.0f;
+				mono.push_back(sum / channels);
+			}
+
+			if (rate != 16000) {
+				const double ratio = 16000.0 / rate;
+				const size_t newSize = (size_t)(mono.size() * ratio);
+				out.resize(newSize);
+				for (size_t i = 0; i < newSize; i++) {
+					const double src = i / ratio;
+					const size_t i0 = (size_t)src;
+					const size_t i1 = std::min(i0 + 1, mono.size() - 1);
+					const double frac = src - i0;
+					out[i] = (float)(mono[i0] * (1.0 - frac) + mono[i1] * frac);
+				}
+			} else {
+				out = std::move(mono);
+			}
+
+			fclose(file);
+			return !out.empty();
+		} else {
+			if (fseek(file, (long)size + (size & 1), SEEK_CUR) != 0)
+				break;
+		}
+	}
+
+	fclose(file);
+	return false;
+}
+
+QString VoiceEngine::TestRecognize(const QString &wavPath, const QStringList &phrases, QString *transcriptOut)
+{
+	std::vector<float> audio;
+	if (!ReadWavMono16k(wavPath, audio))
+		return QString();
+
+	QString model;
+	{
+		config_t *conf = App()->GetUserConfig();
+		model = QString::fromUtf8(config_get_string(conf, kConfigSection, "Model"));
+	}
+	if (model.isEmpty())
+		model = QStringLiteral("base");
+
+	const QString path = ModelPath(model);
+	whisper_context_params contextParams = whisper_context_default_params();
+	contextParams.use_gpu = false;
+	whisper_context *ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), contextParams);
+	if (!ctx)
+		return QString();
+
+	whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+	params.n_threads = 4;
+	params.translate = false;
+	params.no_context = true;
+	params.single_segment = true;
+	params.print_special = false;
+	params.print_progress = false;
+	params.print_realtime = false;
+	params.print_timestamps = false;
+	params.suppress_blank = true;
+	params.temperature = 0.0f;
+	params.max_tokens = 64;
+	params.language = "auto";
+
+	QString text;
+	if (whisper_full(ctx, params, audio.data(), (int)audio.size()) == 0) {
+		const int segments = whisper_full_n_segments(ctx);
+		for (int i = 0; i < segments; i++) {
+			const char *segmentText = whisper_full_get_segment_text(ctx, i);
+			if (segmentText)
+				text += QString::fromUtf8(segmentText).trimmed() + QChar(' ');
+		}
+	}
+	whisper_free(ctx);
+
+	text = text.trimmed();
+	if (transcriptOut)
+		*transcriptOut = text;
+
+	for (const QString &phrase : phrases) {
+		if (PhraseMatches(phrase, text))
+			return phrase;
+	}
+	return QString();
 }
 
 /* ------------------------------------------------------------------------- */
