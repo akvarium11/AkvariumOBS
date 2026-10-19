@@ -39,17 +39,18 @@ Run the build: `build_x64/rundir/RelWithDebInfo/bin/64bit/AkvariumOBS.exe --port
 
 Settings → Output → Replay Buffer → **Voice Commands (Replay Buffer)**.
 
-- One phrase per line, Russian or English.
-- Pick a model (`tiny`, `base`, `small`) and press **Download / verify model** once.
-  Models are stored in `<config>/AkvariumOBS/voice/`.
+- One phrase per line, Russian or English. Nothing else has to be tuned.
+- Pick a model preset (`Fast`/`Balanced`/`Accurate`) and press **Download / verify model**
+  once. Models are stored in `<config>/AkvariumOBS/voice/`.
 - Microphone: *Auto* follows the active audio-capture source of the current scene,
-  or select a specific OBS audio source.
+  a specific OBS source, or any Windows input/output device (output = loopback).
 - With *Listen only while the Replay Buffer is running* (default) the engine is idle
   unless the buffer is active.
 
-How it stays cheap: a WASAPI capture thread does energy VAD at 16 kHz mono; whisper
-runs only on 0.3–6 s speech segments, on a low-priority worker, with `n_threads`
-(default 2) and no context carry-over.
+Latency is preset, not user-tuned: WASAPI capture at 16 kHz mono with an adaptive
+noise gate, a 350 ms speech tail, and whisper running with half of the logical CPU
+cores (`audio_ctx 768`, greedy, no context). Measured 0.7 s recognition for a 1.4 s
+command on a Ryzen 5 5500; the model stays loaded between replay buffer runs.
 
 Command matching tolerates recognition errors (`сделай реплеи` matches `сделай реплей`,
 `safe replay` matches `save replay`) and rejects long unrelated speech.

@@ -37,8 +37,7 @@ struct VoiceConfig {
 	QStringList phrases;
 	QString model = QStringLiteral("base");
 	QString micSource; /* empty = follow the active scene */
-	int threads = 2;
-	double sensitivity = 1.0;
+	int threads = 0;   /* 0 = auto from CPU count */
 	bool onlyWithReplayBuffer = true;
 	bool downloadOnDemand = false;
 };
@@ -120,7 +119,6 @@ private:
 	double m_noiseFloor = 0.0015;
 	int m_silenceMs = 0;
 	bool m_inSpeech = false;
-	double m_sensitivity = 1.0;
 
 	VoiceConfig m_config;
 	QString m_status;

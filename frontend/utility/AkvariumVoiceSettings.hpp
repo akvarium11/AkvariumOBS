@@ -20,8 +20,6 @@ class QLineEdit;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
-class QSlider;
-class QSpinBox;
 
 namespace akvarium {
 
@@ -50,8 +48,6 @@ private:
 	QPlainTextEdit *m_phrases = nullptr;
 	QComboBox *m_model = nullptr;
 	QComboBox *m_mic = nullptr;
-	QSpinBox *m_threads = nullptr;
-	QSlider *m_sensitivity = nullptr;
 	QCheckBox *m_onlyReplayBuffer = nullptr;
 	QLabel *m_status = nullptr;
 	QLabel *m_transcript = nullptr;

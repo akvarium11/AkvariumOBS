@@ -18,7 +18,9 @@
 #include <util/platform.h>
 
 #include <QMetaObject>
+#include <QDateTime>
 #include <QStringList>
+#include <QThread>
 
 #include <curl/curl.h>
 #include <whisper.h>
@@ -56,11 +58,8 @@ VoiceConfig VoiceEngine::LoadConfig()
 		cfg.model = QStringLiteral("base");
 	cfg.micSource = QString::fromUtf8(config_get_string(conf, kConfigSection, "MicSource"));
 	cfg.threads = (int)config_get_int(conf, kConfigSection, "Threads");
-	if (cfg.threads <= 0)
-		cfg.threads = 2;
-	cfg.sensitivity = config_get_double(conf, kConfigSection, "Sensitivity");
-	if (cfg.sensitivity <= 0.0)
-		cfg.sensitivity = 1.0;
+	if (cfg.threads <= 0 || cfg.threads > 8)
+		cfg.threads = 0; /* auto */
 	cfg.onlyWithReplayBuffer = config_get_bool(conf, kConfigSection, "OnlyWithReplayBuffer");
 
 	const char *phrases = config_get_string(conf, kConfigSection, "Phrases");
@@ -96,7 +95,6 @@ void VoiceEngine::SaveConfig(const VoiceConfig &cfg)
 	config_set_string(conf, kConfigSection, "Model", cfg.model.toUtf8().constData());
 	config_set_string(conf, kConfigSection, "MicSource", cfg.micSource.toUtf8().constData());
 	config_set_int(conf, kConfigSection, "Threads", cfg.threads);
-	config_set_double(conf, kConfigSection, "Sensitivity", cfg.sensitivity);
 	config_set_bool(conf, kConfigSection, "OnlyWithReplayBuffer", cfg.onlyWithReplayBuffer);
 
 	obs_data_t *root = obs_data_create();
@@ -393,7 +391,6 @@ void VoiceEngine::Apply()
 		return;
 	}
 
-	m_sensitivity = m_config.sensitivity;
 	m_running = true;
 	m_listening = true;
 	m_captureThread = std::thread(&VoiceEngine::CaptureLoop, this);
@@ -405,6 +402,12 @@ void VoiceEngine::Apply()
 void VoiceEngine::Shutdown()
 {
 	Stop();
+
+	if (m_ctx) {
+		whisper_free(m_ctx);
+		m_ctx = nullptr;
+		m_modelLoaded.clear();
+	}
 }
 
 void VoiceEngine::Stop()
@@ -765,37 +768,43 @@ void VoiceEngine::Feed(const float *data, size_t frames, int channels)
 			sum += v * v;
 		}
 		const double rms = std::sqrt(sum / frameSize);
-		const double threshold = std::max(0.0035, m_noiseFloor * 2.5 * m_sensitivity);
 
-		/* Keep a 300 ms history so the start of a short phrase is not lost. */
+		/* Adaptive gate: speech starts well above the ambient floor and ends
+		   close to it, with hysteresis so steady noise never holds the gate
+		   open. No user-facing sensitivity knob. */
+		const double startThreshold = std::max(0.0045, m_noiseFloor * 3.0);
+		const double endThreshold = std::max(0.0025, m_noiseFloor * 1.8);
+
 		if (!m_inSpeech) {
 			m_history.insert(m_history.end(), m_residual.begin() + (long)offset,
 					 m_residual.begin() + (long)(offset + frameSize));
-			if (m_history.size() > 4800)
-				m_history.erase(m_history.begin(), m_history.begin() + (long)(m_history.size() - 4800));
+			if (m_history.size() > 3200)
+				m_history.erase(m_history.begin(), m_history.begin() + (long)(m_history.size() - 3200));
 
-			if (rms > threshold) {
+			if (rms > startThreshold) {
 				m_inSpeech = true;
 				m_silenceMs = 0;
 				m_segment = m_history;
-				blog(LOG_DEBUG, "[AkvariumVoice] speech start (rms %.4f, threshold %.4f)", rms, threshold);
+				blog(LOG_DEBUG, "[AkvariumVoice] speech start (rms %.4f, gate %.4f)", rms, startThreshold);
 			} else {
-				m_noiseFloor = 0.98 * m_noiseFloor + 0.02 * std::min(rms, 0.05);
+				m_noiseFloor = 0.97 * m_noiseFloor + 0.03 * std::min(rms, 0.03);
 			}
 		}
 
 		if (m_inSpeech) {
-			if (m_segment.size() < 16000 * 6) {
+			if (m_segment.size() < 16000 * 4) {
 				m_segment.insert(m_segment.end(), m_residual.begin() + (long)offset,
 						 m_residual.begin() + (long)(offset + frameSize));
 			}
 
-			if (rms <= threshold * 0.8)
+			if (rms <= endThreshold)
 				m_silenceMs += 20;
 			else
 				m_silenceMs = 0;
 
-			if (m_silenceMs >= 600 || m_segment.size() >= 16000 * 6)
+			/* 350 ms tail: enough to keep the last word, short enough that the
+			   command fires quickly. */
+			if (m_silenceMs >= 350 || m_segment.size() >= 16000 * 4)
 				FinalizeSegment(m_segment);
 		}
 
@@ -810,7 +819,15 @@ void VoiceEngine::FinalizeSegment(std::vector<float> &segment)
 {
 	const size_t minSamples = 16000 * 3 / 10; /* 300 ms */
 
-	if (segment.size() >= minSamples && segment.size() <= 16000 * 6) {
+	double peak = 0.0;
+	for (float sample : segment) {
+		const double magnitude = std::fabs((double)sample);
+		if (magnitude > peak)
+			peak = magnitude;
+	}
+
+	/* Noise that briefly crossed the gate must not cost a whisper pass. */
+	if (segment.size() >= minSamples && segment.size() <= 16000 * 6 && peak >= 0.005) {
 		blog(LOG_DEBUG, "[AkvariumVoice] speech segment %.2f s", (double)segment.size() / 16000.0);
 		std::lock_guard<std::mutex> lock(m_mutex);
 		m_pending = segment;
@@ -825,21 +842,39 @@ void VoiceEngine::FinalizeSegment(std::vector<float> &segment)
 
 void VoiceEngine::InferenceLoop()
 {
-	const QString path = ModelPath(m_config.model);
+	/* Recognition must win against a busy game, otherwise the reply lags. */
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+	const QString model = m_config.model;
+	const QString path = ModelPath(model);
 	if (path.isEmpty())
 		return;
 
-	whisper_context_params contextParams = whisper_context_default_params();
-	contextParams.use_gpu = false;
-	m_ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), contextParams);
-	if (!m_ctx) {
-		QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Не удалось загрузить модель")); },
-					  Qt::QueuedConnection);
-		return;
+	/* The model is expensive to load; keep it between replay buffer runs. */
+	if (!m_ctx || m_modelLoaded != model) {
+		if (m_ctx) {
+			whisper_free(m_ctx);
+			m_ctx = nullptr;
+		}
+
+		whisper_context_params contextParams = whisper_context_default_params();
+		contextParams.use_gpu = false;
+		m_ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), contextParams);
+		if (!m_ctx) {
+			QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Failed to load model")); },
+						  Qt::QueuedConnection);
+			return;
+		}
+		m_modelLoaded = model;
 	}
 
 	QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Слушаю микрофон")); },
 				  Qt::QueuedConnection);
+
+	/* Thread count is not user-configurable: half of the logical cores keeps
+	   the latency low without starving OBS or the game. */
+	const int threadCount = std::max(2, std::min(6, QThread::idealThreadCount() / 2));
+	blog(LOG_INFO, "[AkvariumVoice] model '%s', %d threads, audio_ctx 768", model.toUtf8().constData(),
+	     threadCount);
 
 	const QString prompt = QStringLiteral("Команды: %1.").arg(m_config.phrases.join(QStringLiteral(", ")));
 	const QByteArray promptUtf8 = prompt.toUtf8();
@@ -857,9 +892,8 @@ void VoiceEngine::InferenceLoop()
 			m_hasPending = false;
 		}
 
-		const int threads = std::max(1, std::min(8, m_config.threads));
 		whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-		params.n_threads = threads;
+		params.n_threads = threadCount;
 		params.translate = false;
 		params.no_context = true;
 		params.single_segment = true;
@@ -872,10 +906,14 @@ void VoiceEngine::InferenceLoop()
 		params.temperature = 0.0f;
 		params.max_tokens = 64;
 		params.language = "auto";
+		params.no_timestamps = true;
+		params.audio_ctx = 768; /* commands are short: halves encoder cost */
 		params.initial_prompt = promptUtf8.constData();
 
+		const qint64 startMs = QDateTime::currentMSecsSinceEpoch();
 		if (whisper_full(m_ctx, params, audio.data(), (int)audio.size()) != 0)
 			continue;
+		const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - startMs;
 
 		const int segments = whisper_full_n_segments(m_ctx);
 		QString text;
@@ -886,7 +924,8 @@ void VoiceEngine::InferenceLoop()
 		}
 		text = text.trimmed();
 
-		blog(LOG_INFO, "[AkvariumVoice] heard: '%s'", text.toUtf8().constData());
+		blog(LOG_INFO, "[AkvariumVoice] heard in %lld ms (%.2f s audio): '%s'", (long long)elapsed,
+		     (double)audio.size() / 16000.0, text.toUtf8().constData());
 
 		if (text.isEmpty())
 			continue;
@@ -894,8 +933,7 @@ void VoiceEngine::InferenceLoop()
 		QMetaObject::invokeMethod(this, [this, text]() { HandleTranscript(text); }, Qt::QueuedConnection);
 	}
 
-	whisper_free(m_ctx);
-	m_ctx = nullptr;
+	/* Context stays loaded for the next run; freed in Shutdown(). */
 }
 
 void VoiceEngine::HandleTranscript(const QString &text)

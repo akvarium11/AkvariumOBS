@@ -20,8 +20,6 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QSlider>
-#include <QSpinBox>
 #include <QVBoxLayout>
 
 #include <windows.h>
@@ -53,9 +51,9 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 	form->addRow(QStringLiteral("Phrases:"), m_phrases);
 
 	m_model = new QComboBox(this);
-	m_model->addItem(QStringLiteral("tiny - lightest (~75 MB)"), QStringLiteral("tiny"));
-	m_model->addItem(QStringLiteral("base - balanced (~142 MB)"), QStringLiteral("base"));
-	m_model->addItem(QStringLiteral("small - more accurate, heavier (~466 MB)"), QStringLiteral("small"));
+	m_model->addItem(QStringLiteral("Fast - tiny, lowest latency (~75 MB)"), QStringLiteral("tiny"));
+	m_model->addItem(QStringLiteral("Balanced - base, recommended (~142 MB)"), QStringLiteral("base"));
+	m_model->addItem(QStringLiteral("Accurate - small, slower (~466 MB)"), QStringLiteral("small"));
 	form->addRow(QStringLiteral("Recognition model:"), m_model);
 
 	auto *modelRow = new QHBoxLayout();
@@ -70,18 +68,6 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 
 	m_mic = new QComboBox(this);
 	form->addRow(QStringLiteral("Microphone:"), m_mic);
-
-	m_threads = new QSpinBox(this);
-	m_threads->setRange(1, 8);
-	m_threads->setToolTip(QStringLiteral("CPU threads used for recognition. 2 is a good balance."));
-	form->addRow(QStringLiteral("CPU threads:"), m_threads);
-
-	m_sensitivity = new QSlider(Qt::Horizontal, this);
-	m_sensitivity->setRange(50, 250);
-	m_sensitivity->setValue(100);
-	m_sensitivity->setToolTip(QStringLiteral("VAD threshold. Higher means fewer false triggers, "
-						 "lower catches quiet speech better."));
-	form->addRow(QStringLiteral("Sensitivity:"), m_sensitivity);
 
 	m_onlyReplayBuffer = new QCheckBox(QStringLiteral("Listen only while the Replay Buffer is running"), this);
 	form->addRow(QString(), m_onlyReplayBuffer);
@@ -114,8 +100,6 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 	});
 	connect(m_enabled, &QCheckBox::toggled, this, [this]() { MarkChanged(); });
 	connect(m_onlyReplayBuffer, &QCheckBox::toggled, this, [this]() { MarkChanged(); });
-	connect(m_threads, &QSpinBox::valueChanged, this, [this]() { MarkChanged(); });
-	connect(m_sensitivity, &QSlider::valueChanged, this, [this]() { MarkChanged(); });
 	connect(m_phrases, &QPlainTextEdit::textChanged, this, [this]() { MarkChanged(); });
 	connect(m_mic, &QComboBox::currentIndexChanged, this, [this]() { MarkChanged(); });
 
@@ -220,8 +204,6 @@ void VoiceCommandSettings::Load()
 	m_enabled->setChecked(cfg.enabled);
 	m_phrases->setPlainText(cfg.phrases.join(QChar('\n')));
 	m_model->setCurrentIndex(std::max(0, m_model->findData(cfg.model)));
-	m_threads->setValue(cfg.threads);
-	m_sensitivity->setValue((int)(cfg.sensitivity * 100.0));
 	m_onlyReplayBuffer->setChecked(cfg.onlyWithReplayBuffer);
 
 	RefreshMics();
@@ -255,8 +237,7 @@ void VoiceCommandSettings::Save()
 	cfg.phrases.removeAll(QString());
 	cfg.model = m_model->currentData().toString();
 	cfg.micSource = m_mic->currentData().toString();
-	cfg.threads = m_threads->value();
-	cfg.sensitivity = m_sensitivity->value() / 100.0;
+	cfg.threads = 0; /* auto: the engine picks a thread count from the CPU */
 	cfg.onlyWithReplayBuffer = m_onlyReplayBuffer->isChecked();
 
 	if (cfg.phrases.isEmpty())
