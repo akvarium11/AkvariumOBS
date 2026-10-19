@@ -357,10 +357,29 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	if (auto *advLayout = ui->advOutputReplayFrame->layout())
 		advLayout->addWidget(voiceAdv);
 
+	/* AkvariumOBS: clip sound played whenever the replay buffer saves a clip */
+	replaySoundSimple = new akvarium::ReplaySoundSettings(this);
+	if (auto *replayLayout = qobject_cast<QFormLayout *>(ui->simpleReplayBuf->layout()))
+		replayLayout->addRow(replaySoundSimple);
+	replaySoundAdv = new akvarium::ReplaySoundSettings(this);
+	if (auto *advLayout = ui->advOutputReplayFrame->layout())
+		advLayout->addWidget(replaySoundAdv);
+
 	for (akvarium::VoiceCommandSettings *widget : {voiceSimple.data(), voiceAdv.data()}) {
 		if (!widget)
 			continue;
 		connect(widget, &akvarium::VoiceCommandSettings::Changed, this, [this]() {
+			if (loading)
+				return;
+			outputsChanged = true;
+			EnableApplyButton(true);
+		});
+	}
+
+	for (akvarium::ReplaySoundSettings *widget : {replaySoundSimple.data(), replaySoundAdv.data()}) {
+		if (!widget)
+			continue;
+		connect(widget, &akvarium::ReplaySoundSettings::Changed, this, [this]() {
 			if (loading)
 				return;
 			outputsChanged = true;
@@ -2254,6 +2273,10 @@ void OBSBasicSettings::LoadOutputSettings()
 		voiceSimple->Load();
 	if (voiceAdv)
 		voiceAdv->Load();
+	if (replaySoundSimple)
+		replaySoundSimple->Load(App()->GetUserConfig());
+	if (replaySoundAdv)
+		replaySoundAdv->Load(App()->GetUserConfig());
 
 	ResetEncoders();
 
@@ -3507,6 +3530,22 @@ void OBSBasicSettings::SaveOutputSettings()
 			voiceSimple->Load();
 		if (voiceAdv && voiceAdv != voiceToSave)
 			voiceAdv->Load();
+	}
+
+	akvarium::ReplaySoundSettings *soundToSave = nullptr;
+	if (replaySoundSimple && replaySoundSimple->HasChanges())
+		soundToSave = replaySoundSimple;
+	if (replaySoundAdv && replaySoundAdv->HasChanges())
+		soundToSave = replaySoundAdv;
+	if (!soundToSave)
+		soundToSave = (replaySoundSimple && replaySoundSimple->isVisible()) ? replaySoundSimple.data()
+										     : replaySoundAdv.data();
+	if (soundToSave) {
+		soundToSave->Save(App()->GetUserConfig());
+		if (replaySoundSimple && replaySoundSimple != soundToSave)
+			replaySoundSimple->Load(App()->GetUserConfig());
+		if (replaySoundAdv && replaySoundAdv != soundToSave)
+			replaySoundAdv->Load(App()->GetUserConfig());
 	}
 
 	config_set_string(main->Config(), "Output", "Mode", OutputModeFromIdx(ui->outputMode->currentIndex()));

@@ -1,13 +1,15 @@
 # AkvariumOBS
 
-Personal fork of **OBS Studio 32.2.2** (GPLv2) with three additions:
+Personal fork of **OBS Studio 32.2.2** (GPLv2) with four additions:
 
 1. **Voice commands for the Replay Buffer** — say a phrase into the microphone that the
    current scene uses and the replay is saved. Recognition runs fully offline
    (whisper.cpp, CPU) and only on detected speech.
-2. **Per-scene audio mixer state** — every scene remembers which sources were muted
+2. **Replay clip sound** — drop clipsounds into a folder, pick one in the settings and
+   it plays every time the Replay Buffer saves a clip.
+3. **Per-scene audio mixer state** — every scene remembers which sources were muted
    and at what volume, so a mic can be muted in one scene and live in another.
-3. **Scene binding to applications** — switch scenes when an application is in the
+4. **Scene binding to applications** — switch scenes when an application is in the
    foreground, running in the background, or when it closes.
 
 Product name, window title, executable (`AkvariumOBS.exe`), Windows version resource
@@ -55,6 +57,21 @@ command on a Ryzen 5 5500; the model stays loaded between replay buffer runs.
 Command matching tolerates recognition errors (`сделай реплеи` matches `сделай реплей`,
 `safe replay` matches `save replay`) and rejects long unrelated speech.
 
+## Replay clip sound
+
+Settings → Output → Replay Buffer → **Replay Sound (Replay Buffer)**.
+
+- **Open sounds folder** creates/opens `<config>/AkvariumOBS/sounds`
+  (`%APPDATA%\obs-studio\AkvariumOBS\sounds`, or `<app>/config/...` in portable mode).
+  Drop `.wav`, `.mp3`, `.wma` or `.m4a` files there; subfolders are scanned.
+- **Refresh list**, pick a sound, tick *Play a sound when a replay is saved*, **Apply**.
+  **Preview** plays the selection immediately.
+- The sound is played on the default output device the moment the replay starts being
+  written — from the Save Replay hotkey, the control button, the tray or a voice
+  command — so desktop-audio capture puts it on stream. Playback is asynchronous and
+  never blocks the save; the file handle is released once the clip has played.
+- Stored in `user.ini` as `[AkvariumReplaySound] Enabled` / `Sound`.
+
 ## Per-scene audio state
 
 Automatic. On every scene switch the outgoing scene's mixer state is stored inside the
@@ -91,6 +108,10 @@ build_x64/frontend/RelWithDebInfo/akvarium-phrase-match-test.exe
 # recognition on a WAV file
 cmake --build build_x64 --config RelWithDebInfo --target akvarium-voice-selftest
 akvarium-voice-selftest <model.bin> <audio.wav> "save replay|сделай реплей"
+
+# clip sound: folder discovery, config round-trip, MCI playback
+cmake --build build_x64 --config RelWithDebInfo --target akvarium-replay-sound-test
+akvarium-replay-sound-test <empty scratch dir> [reference.mp3]
 ```
 
 ## License

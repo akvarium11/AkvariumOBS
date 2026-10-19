@@ -21,6 +21,7 @@
 #include "ui_OBSBasicSettings.h"
 
 #include <utility/AkvariumVoiceSettings.hpp>
+#include <utility/AkvariumReplaySound.hpp>
 #include <utility/FFmpegShared.hpp>
 
 #include <QPointer>
@@ -123,6 +124,10 @@ private:
 	/* AkvariumOBS: voice command settings (replay buffer page) */
 	QPointer<akvarium::VoiceCommandSettings> voiceSimple;
 	QPointer<akvarium::VoiceCommandSettings> voiceAdv;
+
+	/* AkvariumOBS: clip sound played on every replay buffer save */
+	QPointer<akvarium::ReplaySoundSettings> replaySoundSimple;
+	QPointer<akvarium::ReplaySoundSettings> replaySoundAdv;
 
 	QPointer<QCheckBox> vodTrackCheckbox;
 	QPointer<QWidget> vodTrackContainer;

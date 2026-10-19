@@ -3,6 +3,7 @@ AkvariumOBS 32.2.2 (Windows x64)
 
 Fork of OBS Studio 32.2.2 (GPLv2) with:
   - voice commands for the Replay Buffer (offline recognition, CPU or GPU);
+  - replay clip sounds (pick one audio file played on every replay save);
   - per-scene audio mixer state (mute/volume remembered per scene);
   - scene binding to applications (foreground / running / closed rules).
 
@@ -34,6 +35,19 @@ Settings -> Output -> Replay Buffer -> Voice Commands (Replay Buffer):
   4. start the Replay Buffer and say the phrase.
 The recognition model (ggml-base.bin) ships with the package in data\voice; other
 models can be downloaded from the same settings page.
+
+Replay clip sound
+-----------------
+Settings -> Output -> Replay Buffer -> Replay Sound (Replay Buffer):
+  1. press "Open sounds folder" and drop your .wav / .mp3 / .wma / .m4a files there
+     (subfolders are scanned too);
+  2. press "Refresh list" and pick a sound, then tick "Play a sound when a replay is
+     saved" and press Apply.
+The chosen file is played on the default output device every time a replay is
+saved, whether that comes from the Save Replay hotkey, the button, the tray or a
+voice command, so desktop-audio capture picks it up for the stream. The folder is
+%APPDATA%\obs-studio\AkvariumOBS\sounds (or <app>\config\AkvariumOBS\sounds in
+portable mode).
 
 Per-scene audio state and application rules
 -------------------------------------------

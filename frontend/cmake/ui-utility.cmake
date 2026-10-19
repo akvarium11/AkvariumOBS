@@ -5,6 +5,8 @@ target_sources(
     utility/AdvancedOutput.hpp
     utility/AkvariumImport.cpp
     utility/AkvariumImport.hpp
+    utility/AkvariumReplaySound.cpp
+    utility/AkvariumReplaySound.hpp
     utility/AkvariumSceneAudio.cpp
     utility/AkvariumSceneAudio.hpp
     utility/AkvariumVoice.cpp

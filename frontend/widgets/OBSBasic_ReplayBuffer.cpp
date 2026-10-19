@@ -23,6 +23,8 @@
 
 #include <qt-wrappers.hpp>
 
+#include <utility/AkvariumReplaySound.hpp>
+
 #include <QCheckBox>
 
 #define REPLAY_BUFFER_START "==== Replay Buffer Start ==========================================="
@@ -164,6 +166,9 @@ void OBSBasic::ReplayBufferSave()
 	proc_handler_t *ph = obs_output_get_proc_handler(outputHandler->replayBuffer);
 	proc_handler_call(ph, "save", &cd);
 	calldata_free(&cd);
+
+	/* AkvariumOBS: user-selected clip sound, played as the clip is written. */
+	akvarium::PlayReplaySoundForSave(App()->GetUserConfig());
 }
 
 void OBSBasic::ReplayBufferSaved()

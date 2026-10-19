@@ -78,6 +78,11 @@ target_link_libraries(
     whisper
 )
 
+# AkvariumOBS: MCI playback for the replay buffer clip sound.
+if(OS_WINDOWS)
+  target_link_libraries(obs-studio PRIVATE winmm)
+endif()
+
 include(cmake/ui-components.cmake)
 include(cmake/ui-dialogs.cmake)
 include(cmake/ui-docks.cmake)
@@ -167,4 +172,19 @@ if(TARGET Qt::Core)
   target_compile_options(akvarium-phrase-match-test PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
   target_link_libraries(akvarium-phrase-match-test PRIVATE Qt::Core)
   set_target_properties_obs(akvarium-phrase-match-test PROPERTIES FOLDER tools)
+endif()
+
+# AkvariumOBS: headless test for the replay buffer clip sound (folder, config, MCI).
+if(TARGET Qt::Widgets AND OS_WINDOWS)
+  add_executable(
+    akvarium-replay-sound-test EXCLUDE_FROM_ALL
+    "${CMAKE_SOURCE_DIR}/tools/akvarium-replay-sound-test.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/utility/AkvariumReplaySound.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/utility/AkvariumReplaySound.hpp"
+  )
+  target_include_directories(akvarium-replay-sound-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(akvarium-replay-sound-test PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+  target_link_libraries(akvarium-replay-sound-test PRIVATE Qt::Widgets OBS::libobs winmm)
+  set_target_properties_obs(akvarium-replay-sound-test PROPERTIES FOLDER tools)
+  set_target_properties(akvarium-replay-sound-test PROPERTIES AUTOMOC TRUE)
 endif()
