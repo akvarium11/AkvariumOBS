@@ -9,6 +9,9 @@
 !/docs
 !/frontend
 !/libobs*
+!/packaging
+# ...but never the built installers
+/packaging/*.exe
 !/plugins
 !/shared
 !/test

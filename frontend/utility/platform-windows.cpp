@@ -48,8 +48,41 @@ static inline bool check_path(const char *data, const char *path, string &output
 	return os_file_exists(output.c_str());
 }
 
+/* AkvariumOBS: resolve data relative to the executable as well. Launching from
+   a Start Menu shortcut or any other launcher sets an arbitrary working
+   directory, which used to break theme/locale loading ("Failed to load theme"). */
+static string GetExecutableDirectory()
+{
+	wchar_t path[MAX_PATH] = {};
+	const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+	if (len == 0 || len == MAX_PATH)
+		return {};
+
+	string utf8;
+	char utf8Buffer[MAX_PATH * 4] = {};
+	os_wcs_to_utf8(path, len, utf8Buffer, sizeof(utf8Buffer));
+	utf8 = utf8Buffer;
+	const size_t slash = utf8.find_last_of("\\/");
+	if (slash == string::npos)
+		return {};
+
+	return utf8.substr(0, slash + 1);
+}
+
 bool GetDataFilePath(const char *data, string &output)
 {
+	const string exeDir = GetExecutableDirectory();
+
+	if (!exeDir.empty()) {
+		/* <install>/bin/64bit -> <install>/data */
+		if (check_path(data, (exeDir + "../../data/obs-studio/").c_str(), output))
+			return true;
+		if (check_path(data, (exeDir + "../data/obs-studio/").c_str(), output))
+			return true;
+		if (check_path(data, (exeDir + "data/obs-studio/").c_str(), output))
+			return true;
+	}
+
 	if (check_path(data, "data/obs-studio/", output)) {
 		return true;
 	}

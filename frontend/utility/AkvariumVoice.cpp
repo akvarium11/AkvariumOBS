@@ -18,6 +18,7 @@
 #include <util/platform.h>
 
 #include <QMetaObject>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QStringList>
 #include <QThread>
@@ -121,12 +122,32 @@ void VoiceEngine::SaveConfig(const VoiceConfig &cfg)
 
 QString VoiceEngine::ModelPath(const QString &model)
 {
-	char path[512];
-	const QString relative = QStringLiteral("AkvariumOBS/voice/ggml-%1.bin").arg(model);
-	if (GetAppConfigPath(path, sizeof(path), relative.toUtf8().constData()) <= 0)
-		return QString();
+	const QString fileName = QStringLiteral("ggml-%1.bin").arg(model);
 
-	return QString::fromUtf8(path);
+	/* 1. Per-user copy (downloaded from the settings page). */
+	char path[512];
+	const QString relative = QStringLiteral("AkvariumOBS/voice/%1").arg(fileName);
+	if (GetAppConfigPath(path, sizeof(path), relative.toUtf8().constData()) > 0) {
+		const QString userPath = QString::fromUtf8(path);
+		if (os_file_exists(userPath.toUtf8().constData()))
+			return userPath;
+	}
+
+	/* 2. Model shipped with the installation (installer/portable layout). */
+	const QString appDir = QCoreApplication::applicationDirPath();
+	for (const QString &candidate :
+	     {appDir + QStringLiteral("/../../data/voice/") + fileName,
+	      appDir + QStringLiteral("/../../../data/voice/") + fileName,
+	      appDir + QStringLiteral("/data/voice/") + fileName}) {
+		if (os_file_exists(candidate.toUtf8().constData()))
+			return candidate;
+	}
+
+	/* 3. Report the user path even if missing: the settings page offers a download. */
+	if (GetAppConfigPath(path, sizeof(path), relative.toUtf8().constData()) > 0)
+		return QString::fromUtf8(path);
+
+	return QString();
 }
 
 QString VoiceEngine::ModelUrl(const QString &model)

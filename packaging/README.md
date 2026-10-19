@@ -43,4 +43,6 @@ The installer writes `HKLM\Software\AkvariumOBS` and the Add/Remove Programs ent
 creates Start Menu and optional desktop shortcuts, and keeps user settings in
 `%APPDATA%\obs-studio` (shared with OBS Studio, so profiles transfer directly).
 
-Silent install for testing: `installer.exe /S /D=D:\path`. Uninstall: `uninstall.exe /S`.
+Shortcuts are created with the working directory set to `bin\64bit`: data (themes,
+locales) is also resolved relative to the executable, so the app starts correctly no
+matter what working directory the launcher uses. Uninstall: `uninstall.exe /S`.

@@ -86,11 +86,13 @@ SectionEnd
 
 Section "Start Menu shortcuts" SecStartMenu
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
+  SetOutPath "$INSTDIR\bin\64bit"
   !insertmacro CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\bin\64bit\${APPEXE}" "$INSTDIR\bin\64bit\${APPEXE}"
   !insertmacro CreateShortcut "$SMPROGRAMS\${APPNAME}\Uninstall ${APPNAME}.lnk" "$INSTDIR\uninstall.exe" "$INSTDIR\uninstall.exe"
 SectionEnd
 
 Section "Desktop shortcut" SecDesktop
+  SetOutPath "$INSTDIR\bin\64bit"
   !insertmacro CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\bin\64bit\${APPEXE}" "$INSTDIR\bin\64bit\${APPEXE}"
 SectionEnd
 
