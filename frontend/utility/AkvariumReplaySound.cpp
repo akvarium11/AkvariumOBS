@@ -28,6 +28,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QStandardPaths>
+#include <QSlider>
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
@@ -44,7 +45,7 @@ namespace akvarium {
 
 const char *kReplaySoundSection = "AkvariumReplaySound";
 
-static const char *kSoundExtensions[] = {"wav", "mp3", "wma", "m4a"};
+static const char *kSoundExtensions[] = {"wav", "mp3", "wma"};
 static const char *kSoundAlias = "akvarium_clipsound";
 
 /* ------------------------------------------------------------------------- */
@@ -117,6 +118,15 @@ ReplaySoundConfig LoadReplaySoundConfig(config_t *conf)
 	const char *sound = config_get_string(conf, kReplaySoundSection, "Sound");
 	if (sound && *sound)
 		cfg.sound = QString::fromUtf8(sound);
+	if (config_has_user_value(conf, kReplaySoundSection, "Volume")) {
+		cfg.volume = int(config_get_int(conf, kReplaySoundSection, "Volume"));
+		if (cfg.volume < 0)
+			cfg.volume = 0;
+		if (cfg.volume > 100)
+			cfg.volume = 100;
+	} else {
+		cfg.volume = 100;
+	}
 
 	return cfg;
 }
@@ -128,6 +138,7 @@ void SaveReplaySoundConfig(config_t *conf, const ReplaySoundConfig &cfg)
 
 	config_set_bool(conf, kReplaySoundSection, "Enabled", cfg.enabled);
 	config_set_string(conf, kReplaySoundSection, "Sound", cfg.sound.toUtf8().constData());
+	config_set_int(conf, kReplaySoundSection, "Volume", std::clamp(cfg.volume, 0, 100));
 	config_save_safe(conf, "tmp", nullptr);
 }
 
@@ -189,7 +200,7 @@ void StopReplaySound()
 #endif
 }
 
-bool PlayReplaySound(const QString &file, QString *error)
+bool PlayReplaySound(const QString &file, int volume, QString *error)
 {
 	if (file.isEmpty()) {
 		if (error)
@@ -207,15 +218,11 @@ bool PlayReplaySound(const QString &file, QString *error)
 #ifdef _WIN32
 	StopReplaySound();
 
-	/* "waveaudio" only understands RIFF WAV; everything else is handed to the
-	   DirectShow MCI device, which decodes mp3/wma/m4a. */
-	const QString suffix = QFileInfo(path).suffix().toLower();
-	const QString type = suffix == QStringLiteral("wav") ? QStringLiteral("waveaudio")
-							    : QStringLiteral("mpegvideo");
-
-	const QString openCmd = QStringLiteral("open \"%1\" type %2 alias %3")
-					.arg(QDir::toNativeSeparators(path), type,
-					     QString::fromLatin1(kSoundAlias));
+	/* Everything goes through the DirectShow MCI device: unlike "waveaudio" it
+	   handles wav, mp3 and wma, and it is the only one that supports per-clip
+	   volume (setaudio). */
+	const QString openCmd = QStringLiteral("open \"%1\" type mpegvideo alias %2")
+					.arg(QDir::toNativeSeparators(path), QString::fromLatin1(kSoundAlias));
 
 	MCIERROR err = MciCommand(openCmd);
 	if (err != 0) {
@@ -225,15 +232,21 @@ bool PlayReplaySound(const QString &file, QString *error)
 	}
 	mciOpen = true;
 
-	MciCommand(QStringLiteral("set %1 time format milliseconds").arg(QString::fromLatin1(kSoundAlias)));
+	const QString alias = QString::fromLatin1(kSoundAlias);
+	MciCommand(QStringLiteral("set %1 time format milliseconds").arg(alias));
+
+	/* MCI volume is 0..1000, our setting is a percentage. */
+	const int mciVolume = std::clamp(volume, 0, 100) * 10;
+	if (MciCommand(QStringLiteral("setaudio %1 volume to %2").arg(alias).arg(mciVolume)) != 0)
+		blog(LOG_WARNING, "[clipsound] this system's MCI device does not support volume control");
 
 	QString lengthText;
-	MciCommand(QStringLiteral("status %1 length").arg(QString::fromLatin1(kSoundAlias)), &lengthText);
+	MciCommand(QStringLiteral("status %1 length").arg(alias), &lengthText);
 
 	bool haveLength = false;
 	const int lengthMs = lengthText.toInt(&haveLength);
 
-	err = MciCommand(QStringLiteral("play %1").arg(QString::fromLatin1(kSoundAlias)));
+	err = MciCommand(QStringLiteral("play %1").arg(alias));
 	if (err != 0) {
 		if (error)
 			*error = MciErrorText(err);
@@ -263,11 +276,11 @@ void PlayReplaySoundForSave(config_t *conf)
 		return;
 
 	QString error;
-	if (!PlayReplaySound(cfg.sound, &error))
+	if (!PlayReplaySound(cfg.sound, cfg.volume, &error))
 		blog(LOG_WARNING, "[clipsound] could not play '%s': %s", cfg.sound.toUtf8().constData(),
 		     error.toUtf8().constData());
 	else
-		blog(LOG_INFO, "[clipsound] playing '%s'", cfg.sound.toUtf8().constData());
+		blog(LOG_INFO, "[clipsound] playing '%s' at %d%%", cfg.sound.toUtf8().constData(), cfg.volume);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -287,6 +300,18 @@ ReplaySoundSettings::ReplaySoundSettings(QWidget *parent)
 
 	m_sound = new QComboBox(this);
 	form->addRow(QStringLiteral("Sound:"), m_sound);
+
+	m_volume = new QSlider(Qt::Horizontal, this);
+	m_volume->setRange(0, 100);
+	m_volume->setValue(100);
+	m_volume->setSingleStep(5);
+	m_volume->setPageStep(10);
+	m_volumeLabel = new QLabel(QStringLiteral("100 %"), this);
+	m_volumeLabel->setMinimumWidth(m_volumeLabel->fontMetrics().horizontalAdvance(QStringLiteral("100 %")) + 8);
+	auto *volumeRow = new QHBoxLayout();
+	volumeRow->addWidget(m_volume, 1);
+	volumeRow->addWidget(m_volumeLabel);
+	form->addRow(QStringLiteral("Volume:"), volumeRow);
 
 	auto *buttons = new QHBoxLayout();
 	m_preview = new QPushButton(QStringLiteral("Preview"), this);
@@ -317,6 +342,10 @@ ReplaySoundSettings::ReplaySoundSettings(QWidget *parent)
 		MarkChanged();
 		UpdateEnabled();
 	});
+	connect(m_volume, &QSlider::valueChanged, this, [this](int value) {
+		m_volumeLabel->setText(QStringLiteral("%1 %").arg(value));
+		MarkChanged();
+	});
 	connect(m_preview, &QPushButton::clicked, this, [this]() { Preview(); });
 	connect(m_refresh, &QPushButton::clicked, this, [this]() { Refresh(); });
 	connect(m_open, &QPushButton::clicked, this, [this]() { OpenFolder(); });
@@ -345,7 +374,7 @@ void ReplaySoundSettings::Refresh(const QString &select)
 	m_sound->blockSignals(false);
 
 	EnsureReplaySoundDir();
-	m_hint->setText(QStringLiteral("%1\nSupported files: .wav, .mp3, .wma, .m4a")
+	m_hint->setText(QStringLiteral("%1\nSupported files: .wav, .mp3, .wma")
 				.arg(QDir::toNativeSeparators(ReplaySoundDir())));
 	m_status->clear();
 
@@ -359,6 +388,10 @@ void ReplaySoundSettings::Load(config_t *conf)
 	const ReplaySoundConfig cfg = LoadReplaySoundConfig(conf);
 	m_enabled->setChecked(cfg.enabled);
 	m_sound->clear();
+	m_volume->blockSignals(true);
+	m_volume->setValue(cfg.volume);
+	m_volumeLabel->setText(QStringLiteral("%1 %").arg(cfg.volume));
+	m_volume->blockSignals(false);
 	Refresh(cfg.sound);
 
 	m_dirty = false;
@@ -370,6 +403,7 @@ void ReplaySoundSettings::Save(config_t *conf)
 	ReplaySoundConfig cfg;
 	cfg.enabled = m_enabled->isChecked();
 	cfg.sound = m_sound->currentData().toString();
+	cfg.volume = m_volume->value();
 	SaveReplaySoundConfig(conf, cfg);
 
 	m_dirty = false;
@@ -398,8 +432,8 @@ void ReplaySoundSettings::Preview()
 	}
 
 	QString error;
-	if (PlayReplaySound(file, &error))
-		m_status->setText(QStringLiteral("Playing %1").arg(file));
+	if (PlayReplaySound(file, m_volume->value(), &error))
+		m_status->setText(QStringLiteral("Playing %1 at %2 %").arg(file).arg(m_volume->value()));
 	else
 		m_status->setText(error);
 }

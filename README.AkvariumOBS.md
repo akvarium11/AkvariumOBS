@@ -63,14 +63,17 @@ Settings → Output → Replay Buffer → **Replay Sound (Replay Buffer)**.
 
 - **Open sounds folder** creates/opens `<config>/AkvariumOBS/sounds`
   (`%APPDATA%\obs-studio\AkvariumOBS\sounds`, or `<app>/config/...` in portable mode).
-  Drop `.wav`, `.mp3`, `.wma` or `.m4a` files there; subfolders are scanned.
-- **Refresh list**, pick a sound, tick *Play a sound when a replay is saved*, **Apply**.
-  **Preview** plays the selection immediately.
-- The sound is played on the default output device the moment the replay starts being
-  written — from the Save Replay hotkey, the control button, the tray or a voice
-  command — so desktop-audio capture puts it on stream. Playback is asynchronous and
-  never blocks the save; the file handle is released once the clip has played.
-- Stored in `user.ini` as `[AkvariumReplaySound] Enabled` / `Sound`.
+  Drop `.wav`, `.mp3` or `.wma` files there; subfolders are scanned.
+- **Refresh list**, pick a sound, set the **Volume** slider (0–100 %), tick
+  *Play a sound when a replay is saved*, **Apply**. **Preview** plays the selection
+  immediately with the current volume.
+- The sound is played on the default output device the moment a save is requested —
+  by the Save Replay hotkey, the control button, the tray or a voice command — so
+  desktop-audio capture puts it on stream. Playback is asynchronous and never blocks
+  the save; the file handle is released once the clip has played.
+  The hotkey path is covered by a `save_requested` signal on the replay buffer output,
+  because that hotkey never goes through the frontend save path.
+- Stored in `user.ini` as `[AkvariumReplaySound] Enabled` / `Sound` / `Volume`.
 
 ## Per-scene audio state
 

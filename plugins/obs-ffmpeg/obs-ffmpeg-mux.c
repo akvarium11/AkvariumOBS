@@ -932,6 +932,13 @@ static void replay_buffer_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hot
 		}
 
 		stream->save_ts = os_gettime_ns() / 1000LL;
+
+		/* AkvariumOBS: let the frontend react to a save request (clip sound).
+		   The hotkey path does not go through the frontend, so it needs this. */
+		calldata_t cd = {0};
+		signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
+		signal_handler_signal(sh, "save_requested", &cd);
+		calldata_free(&cd);
 	}
 }
 
@@ -963,6 +970,7 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 
 	signal_handler_t *sh = obs_output_get_signal_handler(output);
 	signal_handler_add(sh, "void saved()");
+	signal_handler_add(sh, "void save_requested()");
 
 	return stream;
 }

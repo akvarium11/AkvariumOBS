@@ -1050,6 +1050,8 @@ public slots:
 	void ReplayBufferStart();
 	void ReplayBufferSave();
 	void ReplayBufferSaved();
+	/* AkvariumOBS: plays the configured clip sound for a save request. */
+	void ReplayBufferSound();
 	void ReplayBufferStopping();
 	void ReplayBufferStop(int code);
 

@@ -24,6 +24,7 @@ class QCheckBox;
 class QComboBox;
 class QLabel;
 class QPushButton;
+class QSlider;
 
 /* Defined in frontend/OBSApp.cpp; declared here so this module does not pull in
    the whole main window just to resolve the configuration directory. */
@@ -35,6 +36,8 @@ struct ReplaySoundConfig {
 	bool enabled = false;
 	/* Path relative to the sounds folder; subfolders are allowed. */
 	QString sound;
+	/* 0..100, applied to playback. */
+	int volume = 100;
 };
 
 /* Name of the settings section in the user config. */
@@ -52,7 +55,7 @@ ReplaySoundConfig LoadReplaySoundConfig(config_t *conf);
 void SaveReplaySoundConfig(config_t *conf, const ReplaySoundConfig &cfg);
 
 /* Starts playback on the default output device; does not block. */
-bool PlayReplaySound(const QString &file, QString *error = nullptr);
+bool PlayReplaySound(const QString &file, int volume = 100, QString *error = nullptr);
 void StopReplaySound();
 
 /* Plays the configured sound if the feature is enabled. GUI thread only. */
@@ -81,6 +84,8 @@ private:
 
 	QCheckBox *m_enabled = nullptr;
 	QComboBox *m_sound = nullptr;
+	QSlider *m_volume = nullptr;
+	QLabel *m_volumeLabel = nullptr;
 	QPushButton *m_preview = nullptr;
 	QPushButton *m_refresh = nullptr;
 	QPushButton *m_open = nullptr;

@@ -166,8 +166,12 @@ void OBSBasic::ReplayBufferSave()
 	proc_handler_t *ph = obs_output_get_proc_handler(outputHandler->replayBuffer);
 	proc_handler_call(ph, "save", &cd);
 	calldata_free(&cd);
+}
 
-	/* AkvariumOBS: user-selected clip sound, played as the clip is written. */
+/* AkvariumOBS: the replay buffer emits save_requested for the hotkey as well, so
+   the clip sound is triggered from there instead of ReplayBufferSave(). */
+void OBSBasic::ReplayBufferSound()
+{
 	akvarium::PlayReplaySoundForSave(App()->GetUserConfig());
 }
 

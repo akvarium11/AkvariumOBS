@@ -142,24 +142,25 @@ int main(int argc, char **argv)
 	}
 
 	/* Playback: plain WAV, non-ASCII nested WAV, and MP3 when supplied. */
-	auto tryPlay = [&ok](const QString &file) {
+	auto tryPlay = [&ok](const QString &file, int volume) {
 		QString error;
-		const bool played = akvarium::PlayReplaySound(file, &error);
-		printf("play %-28s %s%s\n", file.toUtf8().constData(), played ? "ok" : "FAILED",
-		       played ? "" : (" (" + error + ")").toUtf8().constData());
+		const bool played = akvarium::PlayReplaySound(file, volume, &error);
+		printf("play %-28s vol %3d%%  %s%s\n", file.toUtf8().constData(), volume,
+		       played ? "ok" : "FAILED", played ? "" : (" (" + error + ")").toUtf8().constData());
 		if (!played)
 			ok = false;
 		QThread::msleep(800);
 		akvarium::StopReplaySound();
 	};
 
-	tryPlay(QStringLiteral("sine.wav"));
-	tryPlay(QString::fromUtf8("пак/бипы/клип 1.wav"));
+	tryPlay(QStringLiteral("sine.wav"), 100);
+	tryPlay(QStringLiteral("sine.wav"), 30);
+	tryPlay(QString::fromUtf8("пак/бипы/клип 1.wav"), 100);
 	if (argc >= 3)
-		tryPlay(QStringLiteral("reference.mp3"));
+		tryPlay(QStringLiteral("reference.mp3"), 100);
 
 	QString error;
-	if (akvarium::PlayReplaySound(QStringLiteral("missing.wav"), &error)) {
+	if (akvarium::PlayReplaySound(QStringLiteral("missing.wav"), 100, &error)) {
 		printf("missing file ........ unexpectedly played\n");
 		ok = false;
 	} else {
@@ -176,13 +177,18 @@ int main(int argc, char **argv)
 	akvarium::ReplaySoundConfig saved;
 	saved.enabled = true;
 	saved.sound = QString::fromUtf8("пак/бипы/клип 1.wav");
+	saved.volume = 45;
 	akvarium::SaveReplaySoundConfig(conf, saved);
 
 	const akvarium::ReplaySoundConfig loaded = akvarium::LoadReplaySoundConfig(conf);
 	printf("config round-trip ... %s (%s, sound=%s)\n",
-	       (loaded.enabled == saved.enabled && loaded.sound == saved.sound) ? "ok" : "FAILED",
+	       (loaded.enabled == saved.enabled && loaded.sound == saved.sound &&
+		loaded.volume == saved.volume)
+		       ? "ok"
+		       : "FAILED",
 	       loaded.enabled ? "enabled" : "disabled", loaded.sound.toUtf8().constData());
-	if (loaded.enabled != saved.enabled || loaded.sound != saved.sound)
+	printf("config volume ....... %d%% (expected %d%%)\n", loaded.volume, saved.volume);
+	if (loaded.enabled != saved.enabled || loaded.sound != saved.sound || loaded.volume != saved.volume)
 		ok = false;
 
 	config_close(conf);

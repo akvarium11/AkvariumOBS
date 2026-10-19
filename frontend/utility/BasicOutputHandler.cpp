@@ -143,6 +143,14 @@ void OBSReplayBufferSaved(void *data, calldata_t * /* params */)
 	QMetaObject::invokeMethod(output->main, "ReplayBufferSaved", Qt::QueuedConnection);
 }
 
+/* AkvariumOBS: fired for every save request, including the replay buffer hotkey
+   (which never reaches OBSBasic::ReplayBufferSave). */
+void OBSReplayBufferSaveRequested(void *data, calldata_t * /* params */)
+{
+	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
+	QMetaObject::invokeMethod(output->main, "ReplayBufferSound", Qt::QueuedConnection);
+}
+
 static void OBSStartVirtualCam(void *data, calldata_t * /* params */)
 {
 	BasicOutputHandler *output = static_cast<BasicOutputHandler *>(data);
