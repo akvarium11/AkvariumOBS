@@ -1248,6 +1248,10 @@ void OBSBasic::OBSInit()
 	}
 #endif
 
+	/* AkvariumOBS: create our dock before the saved layout is restored,
+	   otherwise its position would not be part of the restored state. */
+	akvarium::AppSceneEngine::Init(this);
+
 	const char *dockStateStr = config_get_string(App()->GetUserConfig(), "BasicWindow", "DockState");
 
 	if (!dockStateStr) {
@@ -1375,7 +1379,6 @@ void OBSBasic::OBSInit()
 
 	/* AkvariumOBS: fork features */
 	akvarium::SceneAudioState::Init(this);
-	akvarium::AppSceneEngine::Init(this);
 	akvarium::VoiceEngine::Init(this);
 
 	if (!hideWindowOnStart) {

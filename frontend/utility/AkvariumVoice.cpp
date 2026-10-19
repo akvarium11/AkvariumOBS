@@ -296,10 +296,22 @@ VoiceEngine::~VoiceEngine()
 	Stop();
 }
 
+static void whisper_log_callback(enum ggml_log_level level, const char *text, void *)
+{
+	if (!text)
+		return;
+
+	const int obsLevel = (level == GGML_LOG_LEVEL_ERROR) ? LOG_ERROR : LOG_DEBUG;
+	blog(obsLevel, "[whisper] %s", text);
+}
+
 void VoiceEngine::Init(OBSBasic *main)
 {
 	if (engineInstance)
 		return;
+
+	/* Route ggml/whisper logs (including Vulkan device info) into the OBS log. */
+	whisper_log_set(whisper_log_callback, nullptr);
 
 	engineInstance = new VoiceEngine(main);
 	engineInstance->m_config = LoadConfig();
@@ -857,7 +869,9 @@ void VoiceEngine::InferenceLoop()
 		}
 
 		whisper_context_params contextParams = whisper_context_default_params();
-		contextParams.use_gpu = false;
+		/* GPU (Vulkan) when the build has it and a device exists; ggml falls
+		   back to CPU otherwise. */
+		contextParams.use_gpu = true;
 		m_ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), contextParams);
 		if (!m_ctx) {
 			QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Failed to load model")); },
@@ -865,6 +879,7 @@ void VoiceEngine::InferenceLoop()
 			return;
 		}
 		m_modelLoaded = model;
+		blog(LOG_INFO, "[AkvariumVoice] system info: %s", whisper_print_system_info());
 	}
 
 	QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Слушаю микрофон")); },

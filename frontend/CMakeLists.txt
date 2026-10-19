@@ -19,6 +19,23 @@ set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
 set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+# GPU offload for recognition when the Vulkan SDK is available (AMD/Intel/NVIDIA).
+if(DEFINED ENV{VULKAN_SDK})
+  set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+  # obs-deps also ships old Vulkan headers; prefer the installed SDK so the
+  # ggml-vulkan sources (PipelineRobustness, cooperative matrix) compile.
+  list(PREPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}")
+  set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include" CACHE PATH "" FORCE)
+  set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/Lib/vulkan-1.lib" CACHE FILEPATH "" FORCE)
+  set(Vulkan_GLSLC_EXECUTABLE "$ENV{VULKAN_SDK}/Bin/glslc.exe" CACHE FILEPATH "" FORCE)
+  # obs-deps ships an old vulkan_core.h; put the SDK headers in front of it.
+  include_directories(BEFORE "$ENV{VULKAN_SDK}/Include")
+  message(STATUS "AkvariumOBS: Vulkan backend enabled for whisper (VULKAN_SDK=$ENV{VULKAN_SDK})")
+else()
+  set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+  message(STATUS "AkvariumOBS: Vulkan SDK not found, whisper will run on CPU")
+endif()
 if(NOT TARGET whisper)
   add_subdirectory("${CMAKE_SOURCE_DIR}/deps/whisper.cpp" whisper_cpp EXCLUDE_FROM_ALL)
 endif()

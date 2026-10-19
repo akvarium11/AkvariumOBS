@@ -17,6 +17,8 @@
 
 #include "OBSApp.hpp"
 
+#include <utility/AkvariumImport.hpp>
+
 #include <components/Multiview.hpp>
 #include <dialogs/LogUploadDialog.hpp>
 #include <plugin-manager/PluginManager.hpp>
@@ -566,7 +568,20 @@ bool OBSApp::InitGlobalConfig()
 							    : std::move(defaultPluginManagerLocation);
 	}
 
+	/* AkvariumOBS: offer to copy an existing OBS Studio setup on first start. */
+	akvarium::ImportResult importResult =
+		akvarium::OfferImportFromOBS(userConfigLocation / "obs-studio");
+
 	bool userConfigResult = InitUserConfig(userConfigLocation, lastVersion);
+
+	if (userConfigResult && importResult.imported) {
+		if (!importResult.profileName.empty())
+			config_set_string(userConfig, "Basic", "Profile", importResult.profileName.c_str());
+		if (!importResult.sceneCollectionName.empty())
+			config_set_string(userConfig, "Basic", "SceneCollection",
+					  importResult.sceneCollectionName.c_str());
+		config_save_safe(userConfig, "tmp", nullptr);
+	}
 
 	return userConfigResult;
 }
