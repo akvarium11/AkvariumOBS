@@ -933,7 +933,7 @@ OBSApp::OBSApp(int &argc, char **argv, profiler_name_store_t *store)
 	setWindowIcon(QIcon::fromTheme("obs", QIcon(":/res/images/obs.png")));
 #endif
 
-	setDesktopFileName("com.obsproject.Studio");
+	setDesktopFileName("com.akvarium.AkvariumOBS");
 
 	pluginManager_ = std::make_unique<OBS::PluginManager>();
 }
