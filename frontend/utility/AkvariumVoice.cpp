@@ -10,6 +10,7 @@
 #include "AkvariumVoice.hpp"
 
 #include "AkvariumPhraseMatch.hpp"
+#include "AkvariumVoiceFilter.hpp"
 
 #include <OBSApp.hpp>
 
@@ -17,9 +18,9 @@
 #include <obs-module.h>
 #include <util/platform.h>
 
-#include <QMetaObject>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QMetaObject>
 #include <QStringList>
 #include <QThread>
 
@@ -41,8 +42,78 @@ namespace akvarium {
 static const char *kConfigSection = "AkvariumVoice";
 
 /* ------------------------------------------------------------------------- */
-/* Helpers                                                                   */
+/* Audio helpers                                                             */
 /* ------------------------------------------------------------------------- */
+
+static void AppendResampled16k(const float *data, size_t frames, int channels, int sampleRate,
+			       double &phase, float &lastSample, std::vector<float> &out)
+{
+	if (channels < 1)
+		channels = 1;
+
+	std::vector<float> mono(frames);
+	for (size_t i = 0; i < frames; i++) {
+		float sum = 0.0f;
+		for (int c = 0; c < channels; c++)
+			sum += data[i * (size_t)channels + c];
+		mono[i] = sum / channels;
+	}
+
+	if (sampleRate == 16000) {
+		out.insert(out.end(), mono.begin(), mono.end());
+		return;
+	}
+
+	const double ratio = 16000.0 / (double)sampleRate;
+	const size_t outCount = (size_t)((mono.size() + phase) * ratio);
+	const size_t start = out.size();
+	out.resize(start + outCount);
+
+	for (size_t i = 0; i < outCount; i++) {
+		const double pos = (double)i / ratio - phase;
+		const size_t i0 = (size_t)pos;
+		const double frac = pos - (double)i0;
+		const float a = i0 < mono.size() ? mono[i0] : lastSample;
+		const float b = (i0 + 1) < mono.size() ? mono[i0 + 1] : a;
+		out[start + i] = (float)(a * (1.0 - frac) + b * frac);
+	}
+
+	phase = (double)outCount / ratio - (double)mono.size() + phase;
+	if (!mono.empty())
+		lastSample = mono.back();
+}
+
+static DecodeConfidence MeasureDecode(whisper_context *ctx)
+{
+	DecodeConfidence confidence;
+	double sum = 0.0;
+	double minProb = 1.0;
+	int count = 0;
+	double noSpeech = 0.0;
+
+	const int segments = whisper_full_n_segments(ctx);
+	for (int i = 0; i < segments; i++) {
+		noSpeech = std::max(noSpeech, (double)whisper_full_get_segment_no_speech_prob(ctx, i));
+
+		const int tokens = whisper_full_n_tokens(ctx, i);
+		for (int t = 0; t < tokens; t++) {
+			const char *text = whisper_full_get_token_text(ctx, i, t);
+			if (!text || !*text || (text[0] == '<' && text[1] == '|'))
+				continue;
+
+			const double p = (double)whisper_full_get_token_p(ctx, i, t);
+			sum += p;
+			count++;
+			minProb = std::min(minProb, p);
+		}
+	}
+
+	confidence.tokens = count;
+	confidence.meanTokenProb = count > 0 ? sum / (double)count : 0.0;
+	confidence.minTokenProb = count > 0 ? minProb : 0.0;
+	confidence.noSpeechProb = noSpeech;
+	return confidence;
+}
 
 /* ------------------------------------------------------------------------- */
 /* Config                                                                    */
@@ -54,14 +125,17 @@ VoiceConfig VoiceEngine::LoadConfig()
 	config_t *conf = App()->GetUserConfig();
 
 	cfg.enabled = config_get_bool(conf, kConfigSection, "Enabled");
-	cfg.model = QString::fromUtf8(config_get_string(conf, kConfigSection, "Model"));
-	if (cfg.model.isEmpty())
-		cfg.model = QStringLiteral("base");
 	cfg.micSource = QString::fromUtf8(config_get_string(conf, kConfigSection, "MicSource"));
 	cfg.threads = (int)config_get_int(conf, kConfigSection, "Threads");
 	if (cfg.threads <= 0 || cfg.threads > 8)
-		cfg.threads = 0; /* auto */
+		cfg.threads = 0;
+
+	cfg.sensitivity = (int)config_get_int(conf, kConfigSection, "Sensitivity");
+	if (cfg.sensitivity < 1 || cfg.sensitivity > 5)
+		cfg.sensitivity = 3;
+
 	cfg.onlyWithReplayBuffer = config_get_bool(conf, kConfigSection, "OnlyWithReplayBuffer");
+	cfg.model = AutoModel();
 
 	const char *phrases = config_get_string(conf, kConfigSection, "Phrases");
 	if (phrases && *phrases) {
@@ -72,8 +146,11 @@ VoiceConfig VoiceEngine::LoadConfig()
 			for (size_t i = 0; i < count; i++) {
 				obs_data_t *item = obs_data_array_item(arr, i);
 				const char *text = obs_data_get_string(item, "text");
-				if (text && *text)
-					cfg.phrases << QString::fromUtf8(text);
+				if (text && *text) {
+					const QString p = QString::fromUtf8(text).trimmed();
+					if (!p.isEmpty() && !cfg.phrases.contains(p))
+						cfg.phrases << p;
+				}
 				obs_data_release(item);
 			}
 			obs_data_array_release(arr);
@@ -83,7 +160,33 @@ VoiceConfig VoiceEngine::LoadConfig()
 	}
 
 	if (cfg.phrases.isEmpty())
-		cfg.phrases << QStringLiteral("реплей") << QStringLiteral("сделай реплей") << QStringLiteral("save replay");
+		cfg.phrases << QStringLiteral("save replay") << QStringLiteral("clip that");
+
+	const char *aliases = config_get_string(conf, kConfigSection, "Aliases");
+	if (aliases && *aliases) {
+		obs_data_t *root = obs_data_create_from_json(aliases);
+		obs_data_array_t *arr = root ? obs_data_get_array(root, "aliases") : nullptr;
+		if (arr) {
+			const size_t count = obs_data_array_count(arr);
+			for (size_t i = 0; i < count; i++) {
+				obs_data_t *item = obs_data_array_item(arr, i);
+				const QString p = QString::fromUtf8(obs_data_get_string(item, "p"));
+				const QString t = QString::fromUtf8(obs_data_get_string(item, "t"));
+				if (!p.isEmpty() && !t.isEmpty())
+					cfg.aliases.append(qMakePair(p, t));
+				obs_data_release(item);
+			}
+			obs_data_array_release(arr);
+		}
+		if (root)
+			obs_data_release(root);
+	}
+
+	const char *lang = config_get_string(conf, kConfigSection, "Language");
+	if (lang && *lang)
+		cfg.language = QString::fromUtf8(lang);
+	else
+		cfg.language = QStringLiteral("auto");
 
 	return cfg;
 }
@@ -96,7 +199,9 @@ void VoiceEngine::SaveConfig(const VoiceConfig &cfg)
 	config_set_string(conf, kConfigSection, "Model", cfg.model.toUtf8().constData());
 	config_set_string(conf, kConfigSection, "MicSource", cfg.micSource.toUtf8().constData());
 	config_set_int(conf, kConfigSection, "Threads", cfg.threads);
+	config_set_int(conf, kConfigSection, "Sensitivity", cfg.sensitivity);
 	config_set_bool(conf, kConfigSection, "OnlyWithReplayBuffer", cfg.onlyWithReplayBuffer);
+	config_set_string(conf, kConfigSection, "Language", cfg.language.toUtf8().constData());
 
 	obs_data_t *root = obs_data_create();
 	obs_data_array_t *arr = obs_data_array_create();
@@ -113,18 +218,33 @@ void VoiceEngine::SaveConfig(const VoiceConfig &cfg)
 	config_set_string(conf, kConfigSection, "Phrases", json ? json : "{}");
 	obs_data_release(root);
 
+	obs_data_t *aliasRoot = obs_data_create();
+	obs_data_array_t *aliasArr = obs_data_array_create();
+	for (const auto &alias : cfg.aliases) {
+		obs_data_t *item = obs_data_create();
+		obs_data_set_string(item, "p", alias.first.toUtf8().constData());
+		obs_data_set_string(item, "t", alias.second.toUtf8().constData());
+		obs_data_array_push_back(aliasArr, item);
+		obs_data_release(item);
+	}
+	obs_data_set_array(aliasRoot, "aliases", aliasArr);
+	obs_data_array_release(aliasArr);
+
+	const char *aliasJson = obs_data_get_json(aliasRoot);
+	config_set_string(conf, kConfigSection, "Aliases", aliasJson ? aliasJson : "{}");
+	obs_data_release(aliasRoot);
+
 	config_save_safe(conf, "tmp", nullptr);
 }
 
 /* ------------------------------------------------------------------------- */
-/* Model paths                                                               */
+/* Model paths & resolution                                                  */
 /* ------------------------------------------------------------------------- */
 
 QString VoiceEngine::ModelPath(const QString &model)
 {
 	const QString fileName = QStringLiteral("ggml-%1.bin").arg(model);
 
-	/* 1. Per-user copy (downloaded from the settings page). */
 	char path[512];
 	const QString relative = QStringLiteral("AkvariumOBS/voice/%1").arg(fileName);
 	if (GetAppConfigPath(path, sizeof(path), relative.toUtf8().constData()) > 0) {
@@ -133,7 +253,6 @@ QString VoiceEngine::ModelPath(const QString &model)
 			return userPath;
 	}
 
-	/* 2. Model shipped with the installation (installer/portable layout). */
 	const QString appDir = QCoreApplication::applicationDirPath();
 	for (const QString &candidate :
 	     {appDir + QStringLiteral("/../../data/voice/") + fileName,
@@ -143,7 +262,6 @@ QString VoiceEngine::ModelPath(const QString &model)
 			return candidate;
 	}
 
-	/* 3. Report the user path even if missing: the settings page offers a download. */
 	if (GetAppConfigPath(path, sizeof(path), relative.toUtf8().constData()) > 0)
 		return QString::fromUtf8(path);
 
@@ -158,10 +276,54 @@ QString VoiceEngine::ModelUrl(const QString &model)
 bool VoiceEngine::ModelReady(const QString &model)
 {
 	const QString path = ModelPath(model);
-	if (path.isEmpty())
-		return false;
+	return !path.isEmpty() && os_file_exists(path.toUtf8().constData());
+}
 
-	return os_file_exists(path.toUtf8().constData());
+QString VoiceEngine::AutoModel()
+{
+	/* base-q8_0 is ~82 MB, fast and accurate for command words */
+	if (ModelReady(QStringLiteral("base-q8_0")))
+		return QStringLiteral("base-q8_0");
+	if (ModelReady(QStringLiteral("base")))
+		return QStringLiteral("base");
+	if (ModelReady(QStringLiteral("tiny")))
+		return QStringLiteral("tiny");
+	return QStringLiteral("base-q8_0");
+}
+
+QString VoiceEngine::BuildPrompt() const
+{
+	QStringList words;
+	for (const QString &p : m_config.phrases) {
+		const QString t = p.trimmed();
+		if (!t.isEmpty())
+			words << t;
+	}
+	for (const auto &alias : m_config.aliases) {
+		const QString t = alias.second.trimmed();
+		if (!t.isEmpty())
+			words << t;
+	}
+	words.removeDuplicates();
+	if (words.isEmpty())
+		return QString();
+	return words.join(QStringLiteral(", "));
+}
+
+QString VoiceEngine::AutoLanguage(const QStringList &phrases)
+{
+	int cyrillic = 0;
+	int latin = 0;
+	for (const QString &phrase : phrases) {
+		for (QChar ch : phrase) {
+			const ushort c = ch.unicode();
+			if (c >= 0x0400 && c <= 0x04FF)
+				cyrillic++;
+			else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+				latin++;
+		}
+	}
+	return (cyrillic >= latin) ? QStringLiteral("ru") : QStringLiteral("en");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -253,20 +415,15 @@ QString VoiceEngine::TestRecognize(const QString &wavPath, const QStringList &ph
 	if (!ReadWavMono16k(wavPath, audio))
 		return QString();
 
-	QString model;
-	{
-		config_t *conf = App()->GetUserConfig();
-		model = QString::fromUtf8(config_get_string(conf, kConfigSection, "Model"));
-	}
-	if (model.isEmpty())
-		model = QStringLiteral("base");
-
+	const QString model = AutoModel();
 	const QString path = ModelPath(model);
 	whisper_context_params contextParams = whisper_context_default_params();
 	contextParams.use_gpu = false;
 	whisper_context *ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), contextParams);
 	if (!ctx)
 		return QString();
+
+	PrepareForWhisper(audio);
 
 	whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
 	params.n_threads = 4;
@@ -278,11 +435,16 @@ QString VoiceEngine::TestRecognize(const QString &wavPath, const QStringList &ph
 	params.print_realtime = false;
 	params.print_timestamps = false;
 	params.suppress_blank = true;
+	params.suppress_nst = true;
 	params.temperature = 0.0f;
-	params.max_tokens = 64;
-	params.language = "auto";
+	params.max_tokens = 32;
+	params.audio_ctx = 0;
+	params.initial_prompt = nullptr;
+	const QByteArray lang = AutoLanguage(phrases).toUtf8();
+	params.language = lang.constData();
 
 	QString text;
+	DecodeConfidence confidence;
 	if (whisper_full(ctx, params, audio.data(), (int)audio.size()) == 0) {
 		const int segments = whisper_full_n_segments(ctx);
 		for (int i = 0; i < segments; i++) {
@@ -290,12 +452,16 @@ QString VoiceEngine::TestRecognize(const QString &wavPath, const QStringList &ph
 			if (segmentText)
 				text += QString::fromUtf8(segmentText).trimmed() + QChar(' ');
 		}
+		confidence = MeasureDecode(ctx);
 	}
 	whisper_free(ctx);
 
 	text = text.trimmed();
 	if (transcriptOut)
 		*transcriptOut = text;
+
+	if (IsLikelyHallucination(text) || confidence.noSpeechProb > 0.65)
+		return QString();
 
 	for (const QString &phrase : phrases) {
 		if (PhraseMatches(phrase, text))
@@ -305,23 +471,38 @@ QString VoiceEngine::TestRecognize(const QString &wavPath, const QStringList &ph
 }
 
 /* ------------------------------------------------------------------------- */
-/* VoiceEngine                                                               */
+/* VoiceEngine lifecycle                                                     */
 /* ------------------------------------------------------------------------- */
 
 static VoiceEngine *engineInstance = nullptr;
 
-VoiceEngine::VoiceEngine(OBSBasic *main) : m_main(main) {}
+VoiceEngine::VoiceEngine(OBSBasic *main) : m_main(main)
+{
+	m_downloader = new VoiceModelDownloader(this);
+
+	connect(m_downloader, &VoiceModelDownloader::Progress, this,
+		[this](int percent) { emit ModelDownloadProgress(percent); });
+
+	connect(m_downloader, &VoiceModelDownloader::Finished, this, [this](bool ok, const QString &error) {
+		emit ModelDownloadFinished(ok, error);
+		if (ok) {
+			SetStatus(QStringLiteral("Model ready"));
+			ReapplyConfig();
+		} else {
+			SetStatus(QStringLiteral("Model download failed: %1").arg(error));
+		}
+	});
+}
 
 VoiceEngine::~VoiceEngine()
 {
 	Stop();
 }
 
-static void whisper_log_callback(enum ggml_log_level level, const char *text, void *)
+static void whisper_log_cb(enum ggml_log_level level, const char *text, void *)
 {
 	if (!text)
 		return;
-
 	const int obsLevel = (level == GGML_LOG_LEVEL_ERROR) ? LOG_ERROR : LOG_DEBUG;
 	blog(obsLevel, "[whisper] %s", text);
 }
@@ -331,8 +512,7 @@ void VoiceEngine::Init(OBSBasic *main)
 	if (engineInstance)
 		return;
 
-	/* Route ggml/whisper logs (including Vulkan device info) into the OBS log. */
-	whisper_log_set(whisper_log_callback, nullptr);
+	whisper_log_set(whisper_log_cb, nullptr);
 
 	engineInstance = new VoiceEngine(main);
 	engineInstance->m_config = LoadConfig();
@@ -354,13 +534,13 @@ void VoiceEngine::Init(OBSBasic *main)
 		[](const QString &phrase, const QString &transcript) {
 			Q_UNUSED(phrase);
 			if (!obs_frontend_replay_buffer_active()) {
-				engineInstance->SetStatus(QStringLiteral("Услышал «%1», но Replay Buffer не запущен")
-								  .arg(transcript));
+				engineInstance->SetStatus(
+					QStringLiteral("Heard \"%1\" but Replay Buffer is not running").arg(transcript));
 				return;
 			}
 			obs_frontend_replay_buffer_save();
-			engineInstance->SetStatus(QStringLiteral("Сохранён реплей по команде (услышано: «%1»)")
-						  .arg(transcript));
+			engineInstance->SetStatus(
+				QStringLiteral("Replay saved by voice command (heard: \"%1\")").arg(transcript));
 		});
 
 	engineInstance->Apply();
@@ -410,32 +590,56 @@ void VoiceEngine::Apply()
 	Stop();
 
 	if (!m_config.enabled) {
-		SetStatus(QStringLiteral("Выключено"));
+		SetStatus(QStringLiteral("Disabled"));
 		return;
 	}
 
 	if (!ModelReady(m_config.model)) {
-		SetStatus(QStringLiteral("Модель ggml-%1.bin не скачана").arg(m_config.model));
+		SetStatus(QStringLiteral("Model ggml-%1.bin is not downloaded").arg(m_config.model));
 		return;
 	}
 
 	if (m_config.onlyWithReplayBuffer && !obs_frontend_replay_buffer_active()) {
-		SetStatus(QStringLiteral("Ожидание запуска Replay Buffer"));
+		SetStatus(QStringLiteral("Waiting for Replay Buffer to start"));
 		return;
 	}
 
+	m_noiseFloor = 0.0015;
 	m_running = true;
 	m_listening = true;
 	m_captureThread = std::thread(&VoiceEngine::CaptureLoop, this);
 	m_inferThread = std::thread(&VoiceEngine::InferenceLoop, this);
 
-	SetStatus(QStringLiteral("Слушаю микрофон"));
+	SetStatus(QStringLiteral("Listening to microphone"));
 }
 
 void VoiceEngine::Shutdown()
 {
 	Stop();
+}
 
+void VoiceEngine::Stop()
+{
+	const bool wasRunning = m_running.exchange(false);
+	m_interactiveCancel = true;
+
+	if (wasRunning) {
+		m_cv.notify_all();
+		if (m_captureThread.joinable())
+			m_captureThread.join();
+		if (m_inferThread.joinable())
+			m_inferThread.join();
+	}
+
+	if (m_interactiveThread.joinable())
+		m_interactiveThread.join();
+
+	m_listening = false;
+	ReleaseContexts();
+}
+
+void VoiceEngine::ReleaseContexts()
+{
 	if (m_ctx) {
 		whisper_free(m_ctx);
 		m_ctx = nullptr;
@@ -443,30 +647,72 @@ void VoiceEngine::Shutdown()
 	}
 }
 
-void VoiceEngine::Stop()
+void VoiceEngine::DownloadMissingModels()
 {
-	if (!m_running.exchange(false))
+	if (DownloadingModels())
 		return;
 
-	m_cv.notify_all();
+	const QString model = AutoModel();
+	if (ModelReady(model)) {
+		emit ModelDownloadFinished(true, QString());
+		return;
+	}
 
-	if (m_captureThread.joinable())
-		m_captureThread.join();
-	if (m_inferThread.joinable())
-		m_inferThread.join();
-
-	m_listening = false;
+	blog(LOG_INFO, "[AkvariumVoice] downloading model '%s'", model.toUtf8().constData());
+	SetStatus(QStringLiteral("Downloading model %1...").arg(model));
+	m_downloader->Start(model);
 }
 
-/* Resolves the microphone selection into a device spec:
-   ""                            -> active mic of the current scene (or default)
-   "wasapi:<endpoint id>"        -> a Windows capture device
-   "loopback:<endpoint id>"      -> a Windows render device captured via loopback
-   "source:<OBS source name>"    -> device used by an OBS audio source          */
+bool VoiceEngine::DownloadingModels() const
+{
+	return m_downloader && m_downloader->Downloading();
+}
+
+/* ------------------------------------------------------------------------- */
+/* Voice gate thresholds                                                     */
+/* ------------------------------------------------------------------------- */
+
+double VoiceEngine::SpeechStartThreshold() const
+{
+	/* Sensitivity 1 (low) .. 5 (high) */
+	switch (m_config.sensitivity) {
+	case 1:
+		return std::max(0.0080, m_noiseFloor * 3.5);
+	case 2:
+		return std::max(0.0055, m_noiseFloor * 2.8);
+	case 4:
+		return std::max(0.0025, m_noiseFloor * 1.8);
+	case 5:
+		return std::max(0.0018, m_noiseFloor * 1.4);
+	case 3:
+	default:
+		return std::max(0.0035, m_noiseFloor * 2.2);
+	}
+}
+
+double VoiceEngine::SpeechEndThreshold() const
+{
+	const double start = SpeechStartThreshold();
+	return std::max(0.0015, start * 0.55);
+}
+
+QString VoiceEngine::ResolveLanguage() const
+{
+	const QString lang = m_config.language.trimmed().toLower();
+	if (lang.startsWith(QStringLiteral("ru")))
+		return QStringLiteral("ru");
+	if (lang.startsWith(QStringLiteral("en")))
+		return QStringLiteral("en");
+	return AutoLanguage(m_config.phrases);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Audio capture & VAD                                                       */
+/* ------------------------------------------------------------------------- */
+
 QString VoiceEngine::ResolveDeviceSpec() const
 {
 	const QString selection = m_config.micSource.trimmed();
-
 	if (selection.startsWith(QStringLiteral("wasapi:")) || selection.startsWith(QStringLiteral("loopback:")))
 		return selection;
 
@@ -475,11 +721,9 @@ QString VoiceEngine::ResolveDeviceSpec() const
 		sourceName = sourceName.mid(7);
 
 	obs_source_t *source = nullptr;
-
 	if (!sourceName.isEmpty()) {
 		source = obs_get_source_by_name(sourceName.toUtf8().constData());
 		if (!source) {
-			/* Global audio devices are private sources: look through mixer channels. */
 			for (int channel = 1; channel < 7 && !source; channel++) {
 				obs_source_t *candidate = obs_get_output_source(channel);
 				if (!candidate)
@@ -491,10 +735,8 @@ QString VoiceEngine::ResolveDeviceSpec() const
 			}
 		}
 	} else {
-		/* Follow the active scene: first active audio capture source wins. */
 		obs_source_t *sceneSource = obs_frontend_get_current_scene();
 		obs_scene_t *scene = obs_scene_from_source(sceneSource);
-
 		if (scene) {
 			obs_scene_enum_items(
 				scene,
@@ -514,7 +756,6 @@ QString VoiceEngine::ResolveDeviceSpec() const
 				},
 				&source);
 		}
-
 		if (sceneSource)
 			obs_source_release(sceneSource);
 	}
@@ -528,97 +769,11 @@ QString VoiceEngine::ResolveDeviceSpec() const
 			const bool loopback = sourceId && strstr(sourceId, "output_capture");
 			spec = loopback ? QStringLiteral("loopback:%1").arg(QString::fromUtf8(id))
 					: QStringLiteral("wasapi:%1").arg(QString::fromUtf8(id));
-		} else if (sourceId && strstr(sourceId, "output_capture")) {
-			spec = QStringLiteral("loopback:default");
 		}
 		obs_data_release(settings);
 		obs_source_release(source);
 	}
-
 	return spec;
-}
-
-void VoiceEngine::CaptureLoop()
-{
-	const QString spec = ResolveDeviceSpec();
-	m_loopback = spec.startsWith(QStringLiteral("loopback:"));
-
-	IMMDevice *device = nullptr;
-	IAudioClient *client = nullptr;
-	IAudioCaptureClient *capture = nullptr;
-	int sampleRate = 0;
-
-	const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-	if (FAILED(comResult)) {
-		SetStatus(QStringLiteral("COM init failed"));
-		return;
-	}
-
-	if (!OpenCapture(spec, (void **)&device, (void **)&client, (void **)&capture, &sampleRate)) {
-		blog(LOG_WARNING, "[AkvariumVoice] cannot open audio device '%s'", spec.toUtf8().constData());
-		SetStatus(QStringLiteral("Cannot open microphone"));
-		CoUninitialize();
-		return;
-	}
-
-	blog(LOG_INFO, "[AkvariumVoice] capturing '%s' at %d Hz, %d ch%s", spec.toUtf8().constData(), m_sampleRate,
-	     m_channels, m_loopback ? " (loopback)" : "");
-
-	ULONGLONG lastReport = GetTickCount64();
-	UINT64 totalPackets = 0;
-	UINT64 totalFrames = 0;
-
-	while (m_running) {
-		Sleep(10);
-
-		UINT32 packetSize = 0;
-		HRESULT nextResult = capture->GetNextPacketSize(&packetSize);
-		if (FAILED(nextResult)) {
-			blog(LOG_WARNING, "[AkvariumVoice] GetNextPacketSize failed 0x%08lX", (unsigned long)nextResult);
-			break;
-		}
-
-		const ULONGLONG now = GetTickCount64();
-		if (now - lastReport >= 3000) {
-			blog(LOG_DEBUG, "[AkvariumVoice] capture stats: packets=%llu frames=%llu",
-			     (unsigned long long)totalPackets, (unsigned long long)totalFrames);
-			lastReport = now;
-		}
-
-		while (packetSize > 0) {
-			BYTE *data = nullptr;
-			UINT32 frames = 0;
-			DWORD flags = 0;
-
-			if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr)))
-				break;
-
-			totalPackets++;
-			totalFrames += frames;
-			if (frames > 0) {
-				if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-					std::vector<float> silence((size_t)frames * m_channels, 0.0f);
-					Feed(silence.data(), frames, m_channels);
-				} else {
-					Feed(reinterpret_cast<const float *>(data), frames, m_channels);
-				}
-			}
-
-			capture->ReleaseBuffer(frames);
-
-			nextResult = capture->GetNextPacketSize(&packetSize);
-			if (FAILED(nextResult))
-				break;
-		}
-	}
-
-	client->Stop();
-	capture->Release();
-	client->Release();
-	device->Release();
-	CoUninitialize();
-
-	m_listening = false;
 }
 
 bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void **outClient, void **outCapture,
@@ -639,31 +794,16 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 		deviceId = deviceSpec.mid(colon + 1);
 
 	IMMDevice *device = nullptr;
-
 	if (!deviceId.isEmpty() && deviceId != QStringLiteral("default")) {
 		const std::wstring wide = deviceId.toStdWString();
 		enumerator->GetDevice(wide.c_str(), &device);
 	}
 
 	if (!device) {
-		/* OBS itself uses the console role for "Default" devices. */
 		const EDataFlow flow = loopback ? eRender : eCapture;
 		if (FAILED(enumerator->GetDefaultAudioEndpoint(flow, eConsole, &device))) {
 			enumerator->Release();
 			return false;
-		}
-	}
-
-	if (device) {
-		IPropertyStore *props = nullptr;
-		if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props)) && props) {
-			PROPVARIANT value;
-			PropVariantInit(&value);
-			if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &value)) && value.vt == VT_LPWSTR)
-				blog(LOG_INFO, "[AkvariumVoice] device: '%s'",
-				     QString::fromWCharArray(value.pwszVal).toUtf8().constData());
-			PropVariantClear(&value);
-			props->Release();
 		}
 	}
 
@@ -675,8 +815,6 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 		return false;
 	}
 
-	/* Ask WASAPI to convert to 16 kHz mono float. If the device refuses, fall
-	   back to its mix format and resample ourselves. */
 	WAVEFORMATEX format = {};
 	format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
 	format.nChannels = 1;
@@ -690,7 +828,6 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 		flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
 
 	HRESULT hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10000000, 0, &format, nullptr);
-
 	int sampleRate = 16000;
 	int channels = 1;
 
@@ -701,16 +838,12 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 			device->Release();
 			return false;
 		}
-
-		if (mixFormat->wBitsPerSample != 32 ||
-		    mixFormat->wFormatTag != WAVE_FORMAT_IEEE_FLOAT) {
-			/* Only float32 mix formats are handled; most Windows devices use them. */
+		if (mixFormat->wBitsPerSample != 32 || mixFormat->wFormatTag != WAVE_FORMAT_IEEE_FLOAT) {
 			CoTaskMemFree(mixFormat);
 			client->Release();
 			device->Release();
 			return false;
 		}
-
 		sampleRate = (int)mixFormat->nSamplesPerSec;
 		channels = (int)mixFormat->nChannels;
 		hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10000000, 0, mixFormat, nullptr);
@@ -746,98 +879,112 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 	m_channels = channels;
 	m_phase = 0.0;
 	m_lastSample = 0.0f;
-
 	return true;
+}
+
+void VoiceEngine::CaptureLoop()
+{
+	const QString spec = ResolveDeviceSpec();
+	m_loopback = spec.startsWith(QStringLiteral("loopback:"));
+
+	IMMDevice *device = nullptr;
+	IAudioClient *client = nullptr;
+	IAudioCaptureClient *capture = nullptr;
+	int sampleRate = 0;
+
+	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
+		return;
+
+	if (!OpenCapture(spec, (void **)&device, (void **)&client, (void **)&capture, &sampleRate)) {
+		CoUninitialize();
+		return;
+	}
+
+	while (m_running) {
+		Sleep(10);
+
+		UINT32 packetSize = 0;
+		if (FAILED(capture->GetNextPacketSize(&packetSize)))
+			break;
+
+		while (packetSize > 0) {
+			BYTE *data = nullptr;
+			UINT32 frames = 0;
+			DWORD flags = 0;
+
+			if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr)))
+				break;
+
+			if (frames > 0) {
+				if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+					std::vector<float> silence((size_t)frames * m_channels, 0.0f);
+					Feed(silence.data(), frames, m_channels);
+				} else {
+					Feed(reinterpret_cast<const float *>(data), frames, m_channels);
+				}
+			}
+
+			capture->ReleaseBuffer(frames);
+			if (FAILED(capture->GetNextPacketSize(&packetSize)))
+				break;
+		}
+	}
+
+	client->Stop();
+	capture->Release();
+	client->Release();
+	device->Release();
+	CoUninitialize();
 }
 
 void VoiceEngine::Feed(const float *data, size_t frames, int channels)
 {
-	if (channels < 1)
-		channels = 1;
-
-	/* Downmix to mono. */
-	std::vector<float> mono(frames);
-	for (size_t i = 0; i < frames; i++) {
-		float sum = 0.0f;
-		for (int c = 0; c < channels; c++)
-			sum += data[i * (size_t)channels + c];
-		mono[i] = sum / channels;
-	}
-
-	/* Linear resample to 16 kHz, keeping phase across packets. */
 	std::vector<float> pcm16k;
-	if (m_sampleRate == 16000) {
-		pcm16k = std::move(mono);
-	} else {
-		const double ratio = 16000.0 / (double)m_sampleRate;
-		const size_t outCount = (size_t)((mono.size() + m_phase) * ratio);
-		pcm16k.resize(outCount);
+	AppendResampled16k(data, frames, channels, m_sampleRate, m_phase, m_lastSample, pcm16k);
 
-		for (size_t i = 0; i < outCount; i++) {
-			const double pos = (double)i / ratio - m_phase;
-			const size_t i0 = (size_t)pos;
-			const double frac = pos - i0;
-			const float a = i0 < mono.size() ? mono[i0] : m_lastSample;
-			const float b = (i0 + 1) < mono.size() ? mono[i0 + 1] : a;
-			pcm16k[i] = (float)(a * (1.0 - frac) + b * frac);
-		}
-		m_phase = (double)outCount / ratio - (double)mono.size() + m_phase;
-		if (!mono.empty())
-			m_lastSample = mono.back();
-	}
-
-	const size_t frameSize = 320; /* 20 ms at 16 kHz */
-
-	/* Packets are often shorter than one analysis frame (10 ms), so keep the
-	   remainder instead of dropping it. */
+	const size_t frameSize = 320; /* 20 ms */
 	m_residual.insert(m_residual.end(), pcm16k.begin(), pcm16k.end());
 
 	size_t offset = 0;
-
 	while (offset + frameSize <= m_residual.size()) {
 		double sum = 0.0;
 		for (size_t i = 0; i < frameSize; i++) {
 			const double v = m_residual[offset + i];
 			sum += v * v;
 		}
-		const double rms = std::sqrt(sum / frameSize);
+		const double rms = std::sqrt(sum / (double)frameSize);
 
-		/* Adaptive gate: speech starts well above the ambient floor and ends
-		   close to it, with hysteresis so steady noise never holds the gate
-		   open. No user-facing sensitivity knob. */
-		const double startThreshold = std::max(0.0045, m_noiseFloor * 3.0);
-		const double endThreshold = std::max(0.0025, m_noiseFloor * 1.8);
+		const double startThold = SpeechStartThreshold();
+		const double endThold = SpeechEndThreshold();
 
 		if (!m_inSpeech) {
+			/* Maintain rolling 250 ms pre-speech buffer (4000 samples) */
 			m_history.insert(m_history.end(), m_residual.begin() + (long)offset,
 					 m_residual.begin() + (long)(offset + frameSize));
-			if (m_history.size() > 3200)
-				m_history.erase(m_history.begin(), m_history.begin() + (long)(m_history.size() - 3200));
+			if (m_history.size() > 4000)
+				m_history.erase(m_history.begin(), m_history.begin() + (long)(m_history.size() - 4000));
 
-			if (rms > startThreshold) {
+			if (rms > startThold) {
 				m_inSpeech = true;
 				m_silenceMs = 0;
 				m_segment = m_history;
-				blog(LOG_DEBUG, "[AkvariumVoice] speech start (rms %.4f, gate %.4f)", rms, startThreshold);
 			} else {
-				m_noiseFloor = 0.97 * m_noiseFloor + 0.03 * std::min(rms, 0.03);
+				/* Adapt background noise floor smoothly */
+				m_noiseFloor = 0.98 * m_noiseFloor + 0.02 * std::min(rms, 0.02);
 			}
-		}
-
-		if (m_inSpeech) {
+		} else {
 			if (m_segment.size() < 16000 * 4) {
 				m_segment.insert(m_segment.end(), m_residual.begin() + (long)offset,
 						 m_residual.begin() + (long)(offset + frameSize));
 			}
 
-			if (rms <= endThreshold)
+			if (rms <= endThold)
 				m_silenceMs += 20;
 			else
 				m_silenceMs = 0;
 
-			/* 350 ms tail: enough to keep the last word, short enough that the
-			   command fires quickly. */
-			if (m_silenceMs >= 350 || m_segment.size() >= 16000 * 4)
+			/* 450 ms of silence ends speech cleanly without truncating multi-word commands */
+			if (m_silenceMs >= 450 || m_segment.size() >= 16000 * 4)
 				FinalizeSegment(m_segment);
 		}
 
@@ -850,146 +997,662 @@ void VoiceEngine::Feed(const float *data, size_t frames, int channels)
 
 void VoiceEngine::FinalizeSegment(std::vector<float> &segment)
 {
-	const size_t minSamples = 16000 * 3 / 10; /* 300 ms */
-
-	double peak = 0.0;
-	for (float sample : segment) {
-		const double magnitude = std::fabs((double)sample);
-		if (magnitude > peak)
-			peak = magnitude;
-	}
-
-	/* Noise that briefly crossed the gate must not cost a whisper pass. */
-	if (segment.size() >= minSamples && segment.size() <= 16000 * 6 && peak >= 0.005) {
-		blog(LOG_DEBUG, "[AkvariumVoice] speech segment %.2f s", (double)segment.size() / 16000.0);
+	const AudioSegmentStats stats = AnalyzeAudioSegment(segment.data(), segment.size(), SpeechEndThreshold());
+	if (SegmentLooksLikeSpeech(stats)) {
 		std::lock_guard<std::mutex> lock(m_mutex);
-		m_pending = segment;
-		m_hasPending = true;
+		if (m_pendingQueue.size() >= 3)
+			m_pendingQueue.erase(m_pendingQueue.begin());
+		m_pendingQueue.push_back(segment);
 		m_cv.notify_one();
 	}
-
 	segment.clear();
 	m_inSpeech = false;
 	m_silenceMs = 0;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Whisper inference                                                         */
+/* ------------------------------------------------------------------------- */
+
+QString VoiceEngine::DecodeWith(whisper_context *ctx, const std::vector<float> &audio,
+				DecodeConfidence *confidence)
+{
+	if (!ctx || audio.empty())
+		return QString();
+
+	whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+	params.n_threads = std::max(2, std::min(6, QThread::idealThreadCount() / 2));
+	params.translate = false;
+	params.no_context = true;
+	params.single_segment = true;
+	params.print_special = false;
+	params.print_progress = false;
+	params.print_realtime = false;
+	params.print_timestamps = false;
+	params.suppress_blank = true;
+	params.suppress_nst = true;
+	params.temperature = 0.0f;
+	params.max_tokens = 32;
+	params.no_timestamps = true;
+	params.no_speech_thold = 0.65f;
+	params.audio_ctx = 0;         /* Default full context (1500) preserves maximum accuracy */
+
+	const QString promptStr = BuildPrompt();
+	const QByteArray promptBytes = promptStr.toUtf8();
+	params.initial_prompt = promptBytes.isEmpty() ? nullptr : promptBytes.constData();
+
+	const QByteArray lang = ResolveLanguage().toUtf8();
+	params.language = lang.constData();
+
+	if (whisper_full(ctx, params, audio.data(), (int)audio.size()) != 0)
+		return QString();
+
+	QString text;
+	const int segments = whisper_full_n_segments(ctx);
+	for (int i = 0; i < segments; i++) {
+		const char *segmentText = whisper_full_get_segment_text(ctx, i);
+		if (segmentText)
+			text += QString::fromUtf8(segmentText).trimmed() + QChar(' ');
+	}
+
+	if (confidence)
+		*confidence = MeasureDecode(ctx);
+
+	return text.trimmed();
+}
+
 void VoiceEngine::InferenceLoop()
 {
-	/* Recognition must win against a busy game, otherwise the reply lags. */
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+
 	const QString model = m_config.model;
 	const QString path = ModelPath(model);
 	if (path.isEmpty())
 		return;
 
-	/* The model is expensive to load; keep it between replay buffer runs. */
-	if (!m_ctx || m_modelLoaded != model) {
-		if (m_ctx) {
-			whisper_free(m_ctx);
-			m_ctx = nullptr;
-		}
-
-		whisper_context_params contextParams = whisper_context_default_params();
-		/* GPU (Vulkan) when the build has it and a device exists; ggml falls
-		   back to CPU otherwise. */
-		contextParams.use_gpu = true;
-		m_ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), contextParams);
-		if (!m_ctx) {
-			QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Failed to load model")); },
-						  Qt::QueuedConnection);
-			return;
-		}
-		m_modelLoaded = model;
-		blog(LOG_INFO, "[AkvariumVoice] system info: %s", whisper_print_system_info());
+	whisper_context_params cparams = whisper_context_default_params();
+	cparams.use_gpu = false; /* CPU is fast (~100 ms) and free of Vulkan driver quirks */
+	m_ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), cparams);
+	if (!m_ctx) {
+		QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Failed to load model")); },
+					  Qt::QueuedConnection);
+		return;
 	}
+	m_modelLoaded = model;
 
-	QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Слушаю микрофон")); },
+	QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Listening to microphone")); },
 				  Qt::QueuedConnection);
-
-	/* Thread count is not user-configurable: half of the logical cores keeps
-	   the latency low without starving OBS or the game. */
-	const int threadCount = std::max(2, std::min(6, QThread::idealThreadCount() / 2));
-	blog(LOG_INFO, "[AkvariumVoice] model '%s', %d threads, audio_ctx 768", model.toUtf8().constData(),
-	     threadCount);
-
-	const QString prompt = QStringLiteral("Команды: %1.").arg(m_config.phrases.join(QStringLiteral(", ")));
-	const QByteArray promptUtf8 = prompt.toUtf8();
 
 	while (m_running) {
 		std::vector<float> audio;
 		{
 			std::unique_lock<std::mutex> lock(m_mutex);
-			m_cv.wait_for(lock, std::chrono::milliseconds(200), [this]() { return m_hasPending || !m_running; });
+			m_cv.wait_for(lock, std::chrono::milliseconds(200),
+				      [this]() { return !m_pendingQueue.empty() || !m_running; });
 			if (!m_running)
 				break;
-			if (!m_hasPending)
+			if (m_pendingQueue.empty())
 				continue;
-			audio = m_pending;
-			m_hasPending = false;
+			audio = std::move(m_pendingQueue.front());
+			m_pendingQueue.erase(m_pendingQueue.begin());
 		}
 
-		whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-		params.n_threads = threadCount;
-		params.translate = false;
-		params.no_context = true;
-		params.single_segment = true;
-		params.print_special = false;
-		params.print_progress = false;
-		params.print_realtime = false;
-		params.print_timestamps = false;
-		params.suppress_blank = true;
-		params.suppress_nst = true;
-		params.temperature = 0.0f;
-		params.max_tokens = 64;
-		params.language = "auto";
-		params.no_timestamps = true;
-		params.audio_ctx = 768; /* commands are short: halves encoder cost */
-		params.initial_prompt = promptUtf8.constData();
+		PrepareForWhisper(audio);
 
-		const qint64 startMs = QDateTime::currentMSecsSinceEpoch();
-		if (whisper_full(m_ctx, params, audio.data(), (int)audio.size()) != 0)
-			continue;
-		const qint64 elapsed = QDateTime::currentMSecsSinceEpoch() - startMs;
+		DecodeConfidence confidence;
+		const QString text = DecodeWith(m_ctx, audio, &confidence);
 
-		const int segments = whisper_full_n_segments(m_ctx);
-		QString text;
-		for (int i = 0; i < segments; i++) {
-			const char *segmentText = whisper_full_get_segment_text(m_ctx, i);
-			if (segmentText)
-				text += QString::fromUtf8(segmentText).trimmed() + QChar(' ');
-		}
-		text = text.trimmed();
-
-		blog(LOG_INFO, "[AkvariumVoice] heard in %lld ms (%.2f s audio): '%s'", (long long)elapsed,
-		     (double)audio.size() / 16000.0, text.toUtf8().constData());
-
-		if (text.isEmpty())
+		if (text.isEmpty() || confidence.noSpeechProb > 0.65 || IsLikelyHallucination(text))
 			continue;
 
 		QMetaObject::invokeMethod(this, [this, text]() { HandleTranscript(text); }, Qt::QueuedConnection);
 	}
-
-	/* Context stays loaded for the next run; freed in Shutdown(). */
 }
 
 void VoiceEngine::HandleTranscript(const QString &text)
 {
 	SetTranscript(text);
 
-	bool matched = false;
-	QString matchedPhrase;
+	double bestScore = 0.0;
+	const QString bestPhrase = MatchCommand(text, &bestScore);
+
+	if (bestPhrase.isEmpty()) {
+		blog(LOG_INFO, "[AkvariumVoice] transcript '%s' did not match commands (score %.2f)",
+		     text.toUtf8().constData(), bestScore);
+		return;
+	}
+
+	/* 2.5 second cooldown against double triggers */
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	if (bestPhrase == m_lastTriggeredPhrase && (now - m_lastTriggerMs) < 2500)
+		return;
+
+	m_lastTriggerMs = now;
+	m_lastTriggeredPhrase = bestPhrase;
+
+	blog(LOG_INFO, "[AkvariumVoice] triggered command '%s' (score %.2f, text: '%s')",
+	     bestPhrase.toUtf8().constData(), bestScore, text.toUtf8().constData());
+	emit Triggered(bestPhrase, text);
+}
+
+void VoiceEngine::HandleVerifiedCommand(const QString &phrase, const QString &text, double score)
+{
+	Q_UNUSED(phrase);
+	Q_UNUSED(score);
+	HandleTranscript(text);
+}
+
+QString VoiceEngine::MatchCommand(const QString &text, double *scoreOut) const
+{
+	QString bestPhrase;
+	double bestScore = 0.0;
+
 	for (const QString &phrase : m_config.phrases) {
-		if (PhraseMatches(phrase, text)) {
-			matched = true;
-			matchedPhrase = phrase;
-			break;
+		double score = MatchPhrase(phrase, text).score;
+
+		for (const auto &alias : m_config.aliases) {
+			if (alias.first == phrase)
+				score = std::max(score, MatchPhrase(alias.second, text).score);
+		}
+
+		if (score > bestScore) {
+			bestScore = score;
+			bestPhrase = phrase;
 		}
 	}
 
-	blog(LOG_INFO, "[AkvariumVoice] match: %s", matched ? matchedPhrase.toUtf8().constData() : "none");
+	if (scoreOut)
+		*scoreOut = bestScore;
 
-	if (matched)
-		emit Triggered(matchedPhrase, text);
+	return bestScore >= kPhraseMatchThreshold ? bestPhrase : QString();
+}
+
+/* ------------------------------------------------------------------------- */
+/* Interactive recording and live phrase test                                */
+/* ------------------------------------------------------------------------- */
+
+void VoiceEngine::StartPhraseRecording(int seconds)
+{
+	if (m_recordingPhrase.exchange(true))
+		return;
+
+	Stop();
+	m_interactiveCancel = false;
+	m_interactiveThread = std::thread(&VoiceEngine::RunInteractiveRecord, this, seconds, false);
+}
+
+void VoiceEngine::CancelPhraseRecording()
+{
+	m_interactiveCancel = true;
+}
+
+bool VoiceEngine::RecordingPhrase() const
+{
+	return m_recordingPhrase.load();
+}
+
+void VoiceEngine::StartSampleCollection(const QString &phrase, int totalSamples)
+{
+	if (m_collectingSamples.exchange(true))
+		return;
+
+	Stop();
+	m_interactiveCancel = false;
+	m_interactiveThread = std::thread(&VoiceEngine::RunSampleCollection, this, phrase.trimmed(),
+					  std::max(1, totalSamples));
+}
+
+void VoiceEngine::CancelSampleCollection()
+{
+	m_interactiveCancel = true;
+}
+
+bool VoiceEngine::CollectingSamples() const
+{
+	return m_collectingSamples.load();
+}
+
+void VoiceEngine::StartPhraseTest(int seconds)
+{
+	if (m_testingPhrase.exchange(true))
+		return;
+
+	Stop();
+	m_interactiveCancel = false;
+	m_interactiveThread = std::thread(&VoiceEngine::RunInteractiveRecord, this, seconds, true);
+}
+
+bool VoiceEngine::TestingPhrase() const
+{
+	return m_testingPhrase.load();
+}
+
+void VoiceEngine::RunInteractiveRecord(int seconds, bool isTest)
+{
+	const QString spec = ResolveDeviceSpec();
+
+	IMMDevice *device = nullptr;
+	IAudioClient *client = nullptr;
+	IAudioCaptureClient *capture = nullptr;
+	int sampleRate = 0;
+
+	std::vector<float> recorded;
+	bool ok = false;
+
+	if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+		if (OpenCapture(spec, (void **)&device, (void **)&client, (void **)&capture, &sampleRate)) {
+			double phase = 0.0;
+			float lastSample = 0.0f;
+			const ULONGLONG started = GetTickCount64();
+			const int maxWaitMs = std::max(3, seconds) * 1000;
+
+			std::vector<float> preBuffer;
+			std::vector<float> residual;
+			bool inSpeech = false;
+			int silenceMs = 0;
+
+			while (!m_interactiveCancel && (GetTickCount64() - started) < (ULONGLONG)maxWaitMs) {
+				Sleep(10);
+
+				UINT32 packetSize = 0;
+				if (FAILED(capture->GetNextPacketSize(&packetSize)))
+					break;
+
+				while (packetSize > 0) {
+					BYTE *data = nullptr;
+					UINT32 frames = 0;
+					DWORD flags = 0;
+
+					if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr)))
+						break;
+
+					if (frames > 0) {
+						std::vector<float> pcm;
+						if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+							std::vector<float> silence((size_t)frames * m_channels, 0.0f);
+							AppendResampled16k(silence.data(), frames, m_channels, m_sampleRate,
+									   phase, lastSample, pcm);
+						} else {
+							AppendResampled16k(reinterpret_cast<const float *>(data), frames,
+									   m_channels, m_sampleRate, phase, lastSample,
+									   pcm);
+						}
+						residual.insert(residual.end(), pcm.begin(), pcm.end());
+					}
+
+					capture->ReleaseBuffer(frames);
+					if (FAILED(capture->GetNextPacketSize(&packetSize)))
+						break;
+				}
+
+				const size_t frameSize = 320;
+				size_t offset = 0;
+				bool speechEnded = false;
+
+				while (offset + frameSize <= residual.size()) {
+					double sum = 0.0;
+					for (size_t i = 0; i < frameSize; i++) {
+						const double v = residual[offset + i];
+						sum += v * v;
+					}
+					const double rms = std::sqrt(sum / (double)frameSize);
+					const double startThold = SpeechStartThreshold();
+					const double endThold = SpeechEndThreshold();
+
+					if (!inSpeech) {
+						preBuffer.insert(preBuffer.end(), residual.begin() + (long)offset,
+								 residual.begin() + (long)(offset + frameSize));
+						if (preBuffer.size() > 4800)
+							preBuffer.erase(preBuffer.begin(),
+									preBuffer.begin() + (long)(preBuffer.size() - 4800));
+
+						if (rms > startThold) {
+							inSpeech = true;
+							silenceMs = 0;
+							recorded = preBuffer;
+						}
+					} else {
+						recorded.insert(recorded.end(), residual.begin() + (long)offset,
+								residual.begin() + (long)(offset + frameSize));
+
+						if (rms <= endThold)
+							silenceMs += 20;
+						else
+							silenceMs = 0;
+
+						if (silenceMs >= 500 || recorded.size() >= 16000 * 4) {
+							speechEnded = true;
+							offset += frameSize;
+							break;
+						}
+					}
+
+					offset += frameSize;
+				}
+
+				if (offset > 0)
+					residual.erase(residual.begin(), residual.begin() + (long)std::min(offset, residual.size()));
+
+				if (speechEnded)
+					break;
+			}
+
+			client->Stop();
+			capture->Release();
+			client->Release();
+			device->Release();
+			ok = !recorded.empty() && inSpeech && !m_interactiveCancel;
+		}
+		CoUninitialize();
+	}
+
+	QString text;
+	double score = 0.0;
+	QString matchedPhrase;
+	bool matched = false;
+
+	if (ok) {
+		PrepareForWhisper(recorded);
+
+		const QString model = AutoModel();
+		const QString path = ModelPath(model);
+		whisper_context_params cparams = whisper_context_default_params();
+		cparams.use_gpu = false;
+		whisper_context *ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), cparams);
+
+		if (ctx) {
+			DecodeConfidence conf;
+			text = DecodeWith(ctx, recorded, &conf);
+			whisper_free(ctx);
+
+			text = NormalizePhraseText(text);
+
+			if (isTest) {
+				matchedPhrase = MatchCommand(text, &score);
+				matched = !matchedPhrase.isEmpty();
+			}
+		}
+	}
+
+	QMetaObject::invokeMethod(
+		this,
+		[this, isTest, text, matched, matchedPhrase, score]() {
+			if (isTest) {
+				m_testingPhrase = false;
+				emit PhraseTestFinished(matched, text, matchedPhrase, score);
+			} else {
+				m_recordingPhrase = false;
+				emit PhraseRecorded(text);
+			}
+			ReapplyConfig();
+		},
+		Qt::QueuedConnection);
+}
+
+void VoiceEngine::RunSampleCollection(const QString &phrase, int totalSamples)
+{
+	const QString spec = ResolveDeviceSpec();
+
+	IMMDevice *device = nullptr;
+	IAudioClient *client = nullptr;
+	IAudioCaptureClient *capture = nullptr;
+	int sampleRate = 0;
+
+	QStringList learnedVariants;
+
+	const QString model = AutoModel();
+	const QString path = ModelPath(model);
+	whisper_context_params cparams = whisper_context_default_params();
+	cparams.use_gpu = false;
+	whisper_context *ctx = nullptr;
+	if (ModelReady(model)) {
+		ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), cparams);
+	}
+
+	if (!ctx) {
+		QMetaObject::invokeMethod(
+			this,
+			[this, phrase]() {
+				m_collectingSamples = false;
+				emit SampleCollectionFinished(phrase, QStringList());
+				ReapplyConfig();
+			},
+			Qt::QueuedConnection);
+		return;
+	}
+
+	if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+		if (OpenCapture(spec, (void **)&device, (void **)&client, (void **)&capture, &sampleRate)) {
+			double phase = 0.0;
+			float lastSample = 0.0f;
+
+			int sampleIdx = 1;
+			while (sampleIdx <= totalSamples && !m_interactiveCancel) {
+				UINT32 stalePackets = 0;
+				while (SUCCEEDED(capture->GetNextPacketSize(&stalePackets)) && stalePackets > 0) {
+					BYTE *pData = nullptr;
+					UINT32 frames = 0;
+					DWORD flags = 0;
+					if (FAILED(capture->GetBuffer(&pData, &frames, &flags, nullptr, nullptr)))
+						break;
+					capture->ReleaseBuffer(frames);
+				}
+
+				QMetaObject::invokeMethod(
+					this,
+					[this, sampleIdx, totalSamples, phrase]() {
+						emit SampleProgress(sampleIdx, totalSamples,
+								    QStringLiteral("Sample %1 of %2: Say \"%3\" into microphone...")
+									    .arg(sampleIdx)
+									    .arg(totalSamples)
+									    .arg(phrase));
+					},
+					Qt::QueuedConnection);
+
+				std::vector<float> sampleAudio;
+				std::vector<float> preBuffer;
+				std::vector<float> residual;
+				bool inSpeech = false;
+				int silenceMs = 0;
+				const ULONGLONG sampleWaitStart = GetTickCount64();
+				const ULONGLONG maxWaitMs = 25000;
+
+				while (!m_interactiveCancel) {
+					if (!inSpeech && (GetTickCount64() - sampleWaitStart) > maxWaitMs)
+						break;
+
+					Sleep(10);
+
+					UINT32 packetSize = 0;
+					if (FAILED(capture->GetNextPacketSize(&packetSize)))
+						break;
+
+					while (packetSize > 0) {
+						BYTE *data = nullptr;
+						UINT32 frames = 0;
+						DWORD flags = 0;
+
+						if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr)))
+							break;
+
+						if (frames > 0) {
+							std::vector<float> pcm;
+							if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+								std::vector<float> silence((size_t)frames * m_channels, 0.0f);
+								AppendResampled16k(silence.data(), frames, m_channels, m_sampleRate,
+										   phase, lastSample, pcm);
+							} else {
+								AppendResampled16k(reinterpret_cast<const float *>(data), frames,
+										   m_channels, m_sampleRate, phase, lastSample,
+										   pcm);
+							}
+							residual.insert(residual.end(), pcm.begin(), pcm.end());
+						}
+
+						capture->ReleaseBuffer(frames);
+						if (FAILED(capture->GetNextPacketSize(&packetSize)))
+							break;
+					}
+
+					const size_t frameSize = 320;
+					size_t offset = 0;
+					bool speechEnded = false;
+
+					while (offset + frameSize <= residual.size()) {
+						double sum = 0.0;
+						for (size_t i = 0; i < frameSize; i++) {
+							const double v = residual[offset + i];
+							sum += v * v;
+						}
+						const double rms = std::sqrt(sum / (double)frameSize);
+						const double startThold = SpeechStartThreshold();
+						const double endThold = SpeechEndThreshold();
+
+						if (!inSpeech) {
+							preBuffer.insert(preBuffer.end(), residual.begin() + (long)offset,
+									 residual.begin() + (long)(offset + frameSize));
+							if (preBuffer.size() > 4800)
+								preBuffer.erase(preBuffer.begin(),
+										preBuffer.begin() + (long)(preBuffer.size() - 4800));
+
+							if (rms > startThold) {
+								inSpeech = true;
+								silenceMs = 0;
+								sampleAudio = preBuffer;
+								QMetaObject::invokeMethod(
+									this,
+									[this, sampleIdx, totalSamples, phrase]() {
+										emit SampleProgress(sampleIdx, totalSamples,
+												    QStringLiteral("🔴 Listening to sample %1 of %2...")
+													    .arg(sampleIdx)
+													    .arg(totalSamples));
+									},
+									Qt::QueuedConnection);
+							}
+						} else {
+							sampleAudio.insert(sampleAudio.end(), residual.begin() + (long)offset,
+									   residual.begin() + (long)(offset + frameSize));
+
+							if (rms <= endThold)
+								silenceMs += 20;
+							else
+								silenceMs = 0;
+
+							if (silenceMs >= 500 || sampleAudio.size() >= 16000 * 4) {
+								speechEnded = true;
+								offset += frameSize;
+								break;
+							}
+						}
+
+						offset += frameSize;
+					}
+
+					if (offset > 0)
+						residual.erase(residual.begin(), residual.begin() + (long)std::min(offset, residual.size()));
+
+					if (speechEnded || m_interactiveCancel)
+						break;
+				}
+
+				if (m_interactiveCancel)
+					break;
+
+				QString heard;
+				DecodeConfidence conf;
+				if (!sampleAudio.empty() && inSpeech) {
+					PrepareForWhisper(sampleAudio);
+					heard = DecodeWith(ctx, sampleAudio, &conf);
+					heard = NormalizePhraseText(heard);
+				}
+
+				const bool valid = !heard.isEmpty() && conf.noSpeechProb <= 0.65 && !IsLikelyHallucination(heard);
+
+				if (valid) {
+					if (!learnedVariants.contains(heard, Qt::CaseInsensitive))
+						learnedVariants.append(heard);
+
+					QMetaObject::invokeMethod(
+						this,
+						[this, sampleIdx, heard]() {
+							emit SampleCollected(sampleIdx, heard);
+						},
+						Qt::QueuedConnection);
+
+					sampleIdx++;
+
+					if (sampleIdx <= totalSamples && !m_interactiveCancel) {
+						QMetaObject::invokeMethod(
+							this,
+							[this, sampleIdx, totalSamples]() {
+								emit SampleProgress(sampleIdx, totalSamples,
+										    QStringLiteral("Got it! Preparing for next sample..."));
+							},
+							Qt::QueuedConnection);
+
+						const ULONGLONG pauseStart = GetTickCount64();
+						while (!m_interactiveCancel && (GetTickCount64() - pauseStart) < 600) {
+							Sleep(20);
+						}
+					}
+				} else {
+					QMetaObject::invokeMethod(
+						this,
+						[this, sampleIdx, totalSamples, phrase]() {
+							emit SampleProgress(sampleIdx, totalSamples,
+									    QStringLiteral("⚠️ Could not hear clearly. Please repeat \"%1\"...")
+										    .arg(phrase));
+						},
+						Qt::QueuedConnection);
+
+					const ULONGLONG pauseStart = GetTickCount64();
+					while (!m_interactiveCancel && (GetTickCount64() - pauseStart) < 400) {
+						Sleep(20);
+					}
+				}
+			}
+
+			client->Stop();
+			capture->Release();
+			client->Release();
+			device->Release();
+		}
+		CoUninitialize();
+	}
+
+	whisper_free(ctx);
+
+	if (!m_interactiveCancel && !phrase.isEmpty() && !learnedVariants.isEmpty()) {
+		VoiceConfig cfg = LoadConfig();
+		if (!cfg.phrases.contains(phrase, Qt::CaseInsensitive)) {
+			cfg.phrases.append(phrase);
+		}
+		for (const QString &v : learnedVariants) {
+			if (v.compare(phrase, Qt::CaseInsensitive) != 0) {
+				bool exists = false;
+				for (const auto &p : cfg.aliases) {
+					if (p.first.compare(phrase, Qt::CaseInsensitive) == 0 &&
+					    p.second.compare(v, Qt::CaseInsensitive) == 0) {
+						exists = true;
+						break;
+					}
+				}
+				if (!exists) {
+					cfg.aliases.append(qMakePair(phrase, v));
+				}
+			}
+		}
+		SaveConfig(cfg);
+	}
+
+	QMetaObject::invokeMethod(
+		this,
+		[this, phrase, learnedVariants]() {
+			m_collectingSamples = false;
+			emit SampleCollectionFinished(phrase, learnedVariants);
+			ReapplyConfig();
+		},
+		Qt::QueuedConnection);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -997,6 +1660,13 @@ void VoiceEngine::HandleTranscript(const QString &text)
 /* ------------------------------------------------------------------------- */
 
 VoiceModelDownloader::VoiceModelDownloader(QObject *parent) : QObject(parent) {}
+
+VoiceModelDownloader::~VoiceModelDownloader()
+{
+	m_cancel = true;
+	if (m_thread.joinable())
+		m_thread.join();
+}
 
 QString VoiceModelDownloader::TargetPath(const QString &model)
 {
@@ -1013,40 +1683,25 @@ QString VoiceModelDownloader::TargetPath(const QString &model)
 
 struct DownloadState {
 	FILE *file = nullptr;
-	curl_off_t total = 0;
-	int percent = -1;
 	VoiceModelDownloader *self = nullptr;
 };
 
 static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
 {
 	auto *state = static_cast<DownloadState *>(userdata);
-	const size_t written = fwrite(ptr, size, nmemb, state->file);
-	const curl_off_t bytes = (curl_off_t)(size * nmemb);
-	state->total += bytes;
-
-	curl_off_t length = 0;
-	if (state->self && state->total > 0) {
-		/* Content length is unknown here; percentage is computed in Run(). */
-		length = state->total;
-	}
-	UNUSED_PARAMETER(length);
-	return written;
+	return fwrite(ptr, size, nmemb, state->file);
 }
 
-static int progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
+static int progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_off_t)
 {
 	auto *state = static_cast<DownloadState *>(clientp);
-	UNUSED_PARAMETER(ultotal);
-	UNUSED_PARAMETER(ulnow);
+	if (state->self && state->self->Cancelled())
+		return 1;
 
 	if (dltotal > 0 && state->self) {
 		const int percent = (int)((dlnow * 100) / dltotal);
-		if (percent != state->percent) {
-			state->percent = percent;
-			QMetaObject::invokeMethod(state->self, [state, percent]() { emit state->self->Progress(percent); },
-						  Qt::QueuedConnection);
-		}
+		QMetaObject::invokeMethod(state->self, [state, percent]() { emit state->self->Progress(percent); },
+					  Qt::QueuedConnection);
 	}
 	return 0;
 }
@@ -1070,14 +1725,14 @@ void VoiceModelDownloader::Run(const QString &model)
 	const QString partial = target + QStringLiteral(".part");
 
 	if (target.isEmpty()) {
-		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("Нет пути конфигурации")); },
+		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("No configuration path")); },
 					  Qt::QueuedConnection);
 		return;
 	}
 
 	FILE *file = fopen(partial.toUtf8().constData(), "wb");
 	if (!file) {
-		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("Не удалось создать файл")); },
+		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("Cannot create file")); },
 					  Qt::QueuedConnection);
 		return;
 	}
@@ -1099,8 +1754,7 @@ void VoiceModelDownloader::Run(const QString &model)
 		curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
 		curl_easy_setopt(curl, CURLOPT_USERAGENT, "AkvariumOBS");
 
-		const CURLcode result = curl_easy_perform(curl);
-		ok = result == CURLE_OK;
+		ok = (curl_easy_perform(curl) == CURLE_OK);
 		curl_easy_cleanup(curl);
 	}
 
@@ -1108,14 +1762,14 @@ void VoiceModelDownloader::Run(const QString &model)
 
 	if (!ok || m_cancel) {
 		os_unlink(partial.toUtf8().constData());
-		const QString error = m_cancel ? QStringLiteral("Отменено") : QStringLiteral("Ошибка загрузки");
+		const QString error = m_cancel ? QStringLiteral("Cancelled") : QStringLiteral("Download failed");
 		QMetaObject::invokeMethod(this, [this, error]() { emit Finished(false, error); }, Qt::QueuedConnection);
 		return;
 	}
 
 	if (os_safe_replace(target.toUtf8().constData(), partial.toUtf8().constData(), nullptr) != 0) {
 		os_unlink(partial.toUtf8().constData());
-		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("Не удалось сохранить")); },
+		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("Cannot save model")); },
 					  Qt::QueuedConnection);
 		return;
 	}

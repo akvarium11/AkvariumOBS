@@ -1,5 +1,5 @@
-AkvariumOBS 32.2.2 (Windows x64)
-===============================
+AkvariumOBS 1.1 (Windows x64)
+===========================
 
 Fork of OBS Studio 32.2.2 (GPLv2) with:
   - voice commands for the Replay Buffer (offline recognition, CPU or GPU);
@@ -30,11 +30,10 @@ Voice commands
 --------------
 Settings -> Output -> Replay Buffer -> Voice Commands (Replay Buffer):
   1. enable voice commands;
-  2. type one phrase per line, Russian or English (e.g. "save replay");
+  2. click "Train new phrase (5 samples)" to enroll your trigger phrases;
   3. pick the microphone (Auto follows the active mic of the current scene);
   4. start the Replay Buffer and say the phrase.
-The recognition model (ggml-base.bin) ships with the package in data\voice; other
-models can be downloaded from the same settings page.
+The recognition model (ggml-base-q8_0.bin) ships with the package in data\voice.
 
 Replay clip sound
 -----------------

@@ -11,6 +11,7 @@ target_sources(
     utility/AkvariumSceneAudio.hpp
     utility/AkvariumVoice.cpp
     utility/AkvariumVoice.hpp
+    utility/AkvariumVoiceFilter.hpp
     utility/AkvariumVoiceSettings.cpp
     utility/AkvariumVoiceSettings.hpp
     utility/BaseLexer.hpp

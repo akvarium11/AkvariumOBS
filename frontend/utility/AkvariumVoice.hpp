@@ -1,10 +1,5 @@
 /******************************************************************************
-    AkvariumOBS: voice commands for the replay buffer.
-
-    Speech recognition runs locally on whisper.cpp. Audio is captured straight
-    from the microphone that the active scene is using (WASAPI), gated by a
-    cheap energy VAD, so the neural model only ever runs on short speech
-    segments. Idle cost is the capture thread alone.
+    AkvariumOBS: voice-controlled Replay Buffer integration.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -16,12 +11,16 @@
 
 #include <obs.hpp>
 
+#include <QDateTime>
+#include <QList>
 #include <QObject>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -35,12 +34,23 @@ namespace akvarium {
 struct VoiceConfig {
 	bool enabled = false;
 	QStringList phrases;
-	QString model = QStringLiteral("base");
-	QString micSource; /* empty = follow the active scene */
-	int threads = 0;   /* 0 = auto from CPU count */
+	QString model;
+	QString micSource;
+	QString language;
+	int threads = 0;
+	int sensitivity = 3; /* 1 (low) .. 5 (high), default 3 */
 	bool onlyWithReplayBuffer = true;
-	bool downloadOnDemand = false;
+	QList<QPair<QString, QString>> aliases; /* phrase, recognized variant */
 };
+
+struct DecodeConfidence {
+	int tokens = 0;
+	double meanTokenProb = 0.0;
+	double minTokenProb = 0.0;
+	double noSpeechProb = 0.0;
+};
+
+class VoiceModelDownloader;
 
 class VoiceEngine : public QObject {
 	Q_OBJECT
@@ -56,13 +66,31 @@ public:
 	static QString ModelUrl(const QString &model);
 	static bool ModelReady(const QString &model);
 
-	/* Offline self-test: recognise a WAV file and match it against phrases.
-	   Returns the matched phrase (empty if none) and fills transcriptOut. */
+	static QString AutoModel();
+	static QString AutoLanguage(const QStringList &phrases);
+
 	static QString TestRecognize(const QString &wavPath, const QStringList &phrases, QString *transcriptOut);
 
 	void Apply();
 	void Stop();
 	void ReapplyConfig();
+
+	void DownloadMissingModels();
+	bool DownloadingModels() const;
+
+	/* Interactive phrase recording from the microphone */
+	void StartPhraseRecording(int seconds = 3);
+	void CancelPhraseRecording();
+	bool RecordingPhrase() const;
+
+	/* Multi-sample phrase enrollment: prompts user to say phrase N times */
+	void StartSampleCollection(const QString &phrase, int totalSamples = 5);
+	void CancelSampleCollection();
+	bool CollectingSamples() const;
+
+	/* Test recognition against current phrases */
+	void StartPhraseTest(int seconds = 3);
+	bool TestingPhrase() const;
 
 	bool Listening() const;
 	QString LastTranscript() const;
@@ -75,6 +103,14 @@ signals:
 	void StatusChanged();
 	void TranscriptChanged(const QString &text);
 	void Triggered(const QString &phrase, const QString &transcript);
+	void PhraseRecordProgress(int secondsLeft);
+	void PhraseRecorded(const QString &text);
+	void PhraseTestFinished(bool matched, const QString &heardText, const QString &matchedPhrase, double score);
+	void SampleProgress(int currentSample, int totalSamples, const QString &statusText);
+	void SampleCollected(int sampleIndex, const QString &heardText);
+	void SampleCollectionFinished(const QString &phrase, const QStringList &learnedVariants);
+	void ModelDownloadProgress(int percent);
+	void ModelDownloadFinished(bool ok, const QString &message);
 
 private:
 	explicit VoiceEngine(OBSBasic *main);
@@ -82,43 +118,60 @@ private:
 
 	void CaptureLoop();
 	void InferenceLoop();
-	bool OpenCapture(const QString &deviceSpec, void **device, void **client, void **capture,
-			 int *sampleRate);
+	bool OpenCapture(const QString &deviceSpec, void **device, void **client, void **capture, int *sampleRate);
 	void Feed(const float *data, size_t frames, int channels);
 	void Shutdown();
 	void FinalizeSegment(std::vector<float> &segment);
 	void HandleTranscript(const QString &text);
+	void HandleVerifiedCommand(const QString &phrase, const QString &text, double score);
+	void RunInteractiveRecord(int seconds, bool isTest);
+	void RunSampleCollection(const QString &phrase, int totalSamples);
+	double SpeechStartThreshold() const;
+	double SpeechEndThreshold() const;
+	QString ResolveLanguage() const;
+	QString BuildPrompt() const;
+	QString DecodeWith(whisper_context *ctx, const std::vector<float> &audio, DecodeConfidence *confidence);
+	QString MatchCommand(const QString &text, double *scoreOut) const;
+	void ReleaseContexts();
 	QString ResolveDeviceSpec() const;
 
 	OBSBasic *m_main = nullptr;
 
 	std::thread m_captureThread;
 	std::thread m_inferThread;
+	std::thread m_interactiveThread;
 	std::atomic<bool> m_running{false};
+	std::atomic<bool> m_recordingPhrase{false};
+	std::atomic<bool> m_collectingSamples{false};
+	std::atomic<bool> m_testingPhrase{false};
+	std::atomic<bool> m_interactiveCancel{false};
 	std::mutex m_mutex;
 	std::condition_variable m_cv;
-	std::vector<float> m_pending;
-	bool m_hasPending = false;
+	std::vector<std::vector<float>> m_pendingQueue;
 
 	whisper_context *m_ctx = nullptr;
 	QString m_modelLoaded;
 
-	/* Capture format / resampler state (capture thread only) */
+	VoiceModelDownloader *m_downloader = nullptr;
+
+	/* Capture format / resampler */
 	int m_sampleRate = 16000;
 	int m_channels = 1;
 	double m_phase = 0.0;
-	double m_peakWindow = 0.0;
-	size_t m_framesWindow = 0;
 	float m_lastSample = 0.0f;
 	bool m_loopback = false;
 
-	/* VAD state (capture thread only) */
+	/* VAD state */
 	std::vector<float> m_residual;
 	std::vector<float> m_history;
 	std::vector<float> m_segment;
 	double m_noiseFloor = 0.0015;
 	int m_silenceMs = 0;
 	bool m_inSpeech = false;
+
+	/* Trigger de-duplication */
+	qint64 m_lastTriggerMs = 0;
+	QString m_lastTriggeredPhrase;
 
 	VoiceConfig m_config;
 	QString m_status;
@@ -131,11 +184,15 @@ class VoiceModelDownloader : public QObject {
 
 public:
 	explicit VoiceModelDownloader(QObject *parent = nullptr);
+	~VoiceModelDownloader() override;
 
 	static QString TargetPath(const QString &model);
 
 	void Start(const QString &model);
 	void Cancel();
+
+	bool Downloading() const { return m_thread.joinable(); }
+	bool Cancelled() const { return m_cancel.load(); }
 
 signals:
 	void Progress(int percent);

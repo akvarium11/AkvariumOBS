@@ -11,208 +11,231 @@
 </p>
 
 <p align="center">
-  Личный форк OBS Studio 32.2.2: реплей по голосовой команде, отдельный миксер для каждой сцены<br>
-  и автоматическое переключение сцен по активному приложению.
+  <a href="#english"><b>English</b></a> &nbsp;&bull;&nbsp; <a href="#russian"><b>Русский</b></a>
 </p>
 
 ---
 
-## Что это
+<a id="english"></a>
+## English
 
-AkvariumOBS — не плагин и не обёртка, а полноценный форк исходников OBS Studio 32.2.2.
-Три вещи, которые мне были нужны в стриме и которых нет в апстриме:
+[Переключиться на русский](#russian)
 
-| | Возможность | Зачем |
+### Overview
+
+AkvariumOBS is a dedicated fork of **OBS Studio 32.2.2** (GPLv2) enhanced with key stream and gameplay recording features absent from upstream OBS:
+
+| | Feature | Purpose |
 |---|---|---|
-| 🎙 | **Голосовые команды для Replay Buffer** | сказать «сделай реплей» вместо хоткея — распознавание полностью офлайн |
-| 🎚 | **Состояние микшера на сцену** | микрофон заглушён в одной сцене и жив в другой, автоматически |
-| 🪟 | **Привязка сцен к приложениям** | сцена меняется, когда игра вышла в фокус, свернулась или закрылась |
+| 🎙 | **Voice Commands for Replay Buffer** | Save instant replays hands-free by speaking phrases like "save replay" or "clip that" — 100% offline |
+| 🔊 | **Replay Clip Sound** | Plays a configurable audio chime whenever a replay buffer is saved (via voice, hotkey, or button) |
+| 🎚 | **Per-Scene Audio Mixer State** | Automatically remembers and restores source volume and mute states per scene |
+| 🪟 | **Scene Binding to Applications** | Automatically changes scenes when a targeted application focuses, minimizes, or exits |
 
-Продуктовое имя, заголовок окна, `AkvariumOBS.exe`, версионный ресурс Windows, иконки
-(exe, окно, трей) и тексты своего UI перебрендированы. Внутренние идентификаторы OBS,
-пути конфигов и ABI плагинов не тронуты — сторонние плагины апстрима работают как раньше.
-
----
-
-## Возможности
-
-### 🎙 Голосовые команды для Replay Buffer
-
-**Настройки → Вывод → Replay Buffer → Voice Commands (Replay Buffer).**
-
-- Фразы — по одной в строке, русский или английский. Больше ничего настраивать не нужно.
-- Пресет модели выбирается один раз: `Fast` (tiny, ~75 МБ), `Balanced` (base, ~142 МБ),
-  `Accurate` (small, ~466 МБ). Кнопка **Download / verify model** кладёт модель в
-  `<config>/AkvariumOBS/voice/`.
-- Микрофон: *Auto* берёт активный источник захвата звука текущей сцены, либо конкретный
-  источник OBS, либо любое устройство Windows (для output-устройств — loopback).
-- По умолчанию движок работает только пока запущен Replay Buffer.
-
-Распознавание — whisper.cpp, целиком локально, никакой сети. Задержка зафиксирована
-пресетом, а не ползунком: WASAPI 16 кГц моно, адаптивный шумовой гейт, хвост речи 350 мс,
-потоков — половина логических ядер, `audio_ctx 768`, greedy без контекста. На Ryzen 5 5500
-команда длиной 1.4 с распознаётся за ~0.7 с. Модель остаётся в памяти между запусками буфера.
-GPU-офлоад whisper идёт через Vulkan, если сборка и драйвер это умеют; иначе тихий откат на CPU.
-
-Сопоставление команд терпит ошибки распознавания (`сделай реплеи` → `сделай реплей`,
-`safe replay` → `save replay`) и отбрасывает длинную постороннюю речь.
-
-### 🎚 Состояние микшера на сцену
-
-Работает само: при переключении сцены состояние уходящей сцены сохраняется в её JSON,
-состояние входящей — применяется. Охвачены все источники из Audio Mixer, включая глобальные
-устройства вроде `Mic/Aux` и `Desktop Audio`.
-
-Правый клик по сцене:
-
-- **Remember volume and mute for this scene** — включить/выключить запоминание;
-- **Capture current audio state for this scene** — перезаписать снимок текущим состоянием.
-
-### 🪟 Привязка сцен к приложениям
-
-Док **Scene Binding to Applications** (справа). Правило — это exe, условие, целевая сцена
-и флаг «включено».
-
-| Условие | Срабатывает, когда |
-|---|---|
-| In foreground | приложение владеет активным окном |
-| Running (foreground or background) | процесс существует |
-| Running but not in foreground | процесс существует и не в фокусе |
-| Not running (closed) | процесса нет |
-
-Правила проверяются сверху вниз каждые 700 мс, побеждает первое совпавшее, сцена
-переключается только при смене совпавшего правила. Хранятся в `user.ini`, секция
-`[AkvariumAppScenes]`.
-
-### Мелочи, без которых неудобно
-
-- **Импорт профилей OBS при первом запуске** — если найден `%APPDATA%\obs-studio`, форк
-  предлагает перенести профили и коллекции сцен, чтобы стартовать не с пустого холста.
-  Спрашивает один раз.
-- **Раскладка доков запоминается** — свой док создаётся до восстановления сохранённого
-  layout, поэтому его позиция не слетает.
-- **UI на русском** — включая добавленные экраны.
-- **Своя иконка** во всех состояниях трея.
+Product naming, window title, `AkvariumOBS.exe`, Windows version metadata, icons, and custom UI components are fully rebranded. Internal OBS identifiers, configuration directories, and plugin ABI remain unchanged, preserving 100% compatibility with existing OBS Studio plugins and profiles.
 
 ---
 
-## Установка
+### Features
 
-Готовые артефакты собираются из `packaging/` (см. [packaging/README.md](packaging/README.md)):
+#### 🎙 Voice Commands for Replay Buffer
+
+**Settings → Output → Replay Buffer → Voice Commands (Replay Buffer)**
+
+- **Smart Speech Architecture:** Powered by `whisper.cpp` with bundled 8-bit quantized `base-q8_0` model. Uses ~75 MB RAM with ~80 ms inference latency. No network connection needed.
+- **5-Sample Repetition Enrollment:** Click **"Train new phrase (5 samples)"**, say your trigger phrase 5 times. The engine captures acoustic variants and builds custom vocabulary aliases automatically.
+- **Pill Tag Phrase Management:** Enrolled phrases appear as visual pill badges with one-click deletion (`[ ✕ phrase ]`).
+- **Initial Prompt Keyword Biasing:** Whisper is prompted dynamically with your active phrase aliases, ensuring high recognition accuracy even through heavy gaming accents or background noise.
+- **False Trigger Rejection:** VAD silence trimming and speech duration limits reject background chatter, Discord voice chat, and game sound effects.
+- **Test Recognition Tool:** Built-in microphone verification button displays real-time transcription and confidence scoring.
+
+#### 🔊 Replay Clip Sound
+
+**Settings → Output → Replay Buffer → Replay Sound (Replay Buffer)**
+
+- Drop `.wav`, `.mp3`, or `.wma` audio files into `%APPDATA%\obs-studio\AkvariumOBS\sounds` (or `config\AkvariumOBS\sounds` in portable mode).
+- Plays on the default Windows audio output device whenever a replay is saved (via voice command, hotkey, or UI button), allowing stream desktop capture to include the feedback sound.
+- Independent volume slider and test playback button.
+
+#### 🎚 Per-Scene Audio Mixer State
+
+- Automatically persists mute and volume state for all sources in the Audio Mixer (including global devices like `Mic/Aux` and `Desktop Audio`) on scene transitions.
+- Right-click any scene:
+  - **Remember volume and mute for this scene** — toggle tracking for this scene.
+  - **Capture current audio state for this scene** — take an immediate snapshot.
+
+#### 🪟 Scene Binding to Applications
+
+Dock panel **Scene Binding to Applications** (right sidebar):
+- Configurable rules based on executable name, state (`In foreground`, `Running`, `Running but not in foreground`, `Not running / closed`), and target scene.
+- Checked every 700 ms; switches scenes seamlessly without interrupting recordings or streams.
+
+---
+
+### Installation & Downloads
+
+Official release packages:
 
 ```text
-AkvariumOBS-32.2.2-Windows-x64-Installer.exe   установщик (NSIS)
-AkvariumOBS-32.2.2-Windows-x64-Portable.zip    портативная сборка
+AkvariumOBS-1.1-Windows-x64-Installer.exe   Windows NSIS Installer (solid LZMA)
+AkvariumOBS-1.1-Windows-x64-Portable.zip    Portable standalone archive
 ```
 
-- Установщик ставит в выбранную папку, пишет `HKLM\Software\AkvariumOBS`, добавляет пункт
-  в «Удаление программ» и ярлыки. Тихая установка: `installer.exe /S /D=D:\path`.
-- Настройки пользователя живут в `%APPDATA%\obs-studio` — том же каталоге, что и у OBS Studio,
-  поэтому профили переносятся один в один.
-- В portable-сборку уже вложены VC++ runtime, OpenMP, Vulkan loader и модель распознавания,
-  отдельно доставлять ничего не нужно.
-
-Запуск собранной версии из дерева сборки:
-
-```bash
-build_x64/rundir/RelWithDebInfo/bin/64bit/AkvariumOBS.exe --portable
-```
+- **Installer:** Installs to `Program Files\AkvariumOBS`, registers shortcuts, uninstaller in Windows Settings. Silent mode: `installer.exe /S /D=D:\path`.
+- **Portable:** Unpack anywhere, run `bin\64bit\AkvariumOBS.exe`. Add `--portable` to store settings locally in `.\config`.
+- Bundles the recognition model (`data\voice\ggml-base-q8_0.bin`), VC++ CRT, OpenMP, and Vulkan loader. Zero extra runtimes required.
 
 ---
 
-## Быстрый старт
+### Quick Start
 
-**Реплей по голосу**
-
-1. Настройки → Вывод → включить Replay Buffer, зайти в **Voice Commands**.
-2. Вписать фразы: `сделай реплей`, `save replay` — по одной в строке.
-3. Выбрать модель (`Balanced` — разумный дефолт), нажать **Download / verify model**.
-4. Микрофон оставить на *Auto*. Запустить буфер и сказать фразу.
-
-**Свой миксер в каждой сцене**
-
-1. Настроить звук в первой сцене → правый клик по сцене → **Capture current audio state**.
-2. Переключиться на другую сцену, настроить звук иначе — снимок создастся сам.
-3. Правый клик → **Remember volume and mute for this scene** отключает поведение для сцены.
-
-**Сцена под приложение**
-
-1. Открыть док **Scene Binding to Applications**.
-2. Добавить правило: exe игры, условие `In foreground`, нужная сцена.
-3. Второе правило: та же игра, `Not running (closed)` → сцена «стол».
+1. Open **Settings → Output**, enable **Replay Buffer**, scroll to **Voice Commands**.
+2. Check **Enable voice commands for Replay Buffer**.
+3. Click **"Train new phrase (5 samples)"**, enter e.g. `clip that` or `save replay`, and speak the phrase 5 times when prompted.
+4. Leave microphone on **Auto** (follows active scene mic).
+5. Start the Replay Buffer and speak your phrase!
 
 ---
 
-## Сборка из исходников
+### Building from Source
 
-Нужно:
-
-- Visual Studio 2022 Build Tools с workload **Desktop development with C++** и компонентом **C++ ATL**
+Requirements:
+- Visual Studio 2022 Build Tools (**Desktop development with C++** and **C++ ATL**)
 - Windows 11 SDK 10.0.26100
-- CMake 3.28+ (генератор Visual Studio 17 2022)
-- ~6 ГБ на зависимости, ~4 ГБ на дерево сборки
+- CMake 3.28+ (Visual Studio 17 2022 generator)
 
 ```bash
 cmake -S . -B build_x64 -G "Visual Studio 17 2022" -A x64 -DENABLE_BROWSER=ON
 cmake --build build_x64 --config RelWithDebInfo --parallel
 ```
 
-Зависимости (obs-deps, Qt6, CEF) скачиваются в `.deps` при первой конфигурации и сверяются
-по хешам из `CMakePresets.json`. Если CMake не может проверить TLS (нет CA-стора),
-конфигурировать с `-DCMAKE_TLS_VERIFY=0`.
-
----
-
-## Тесты
-
+Run test suite:
 ```bash
-# сопоставление фраз, модель не нужна
 cmake --build build_x64 --config RelWithDebInfo --target akvarium-phrase-match-test
-build_x64/frontend/RelWithDebInfo/akvarium-phrase-match-test.exe
+build_x64\rundir\RelWithDebInfo\bin\64bit\akvarium-phrase-match-test.exe
+```
 
-# распознавание на wav-файле
-cmake --build build_x64 --config RelWithDebInfo --target akvarium-voice-selftest
-akvarium-voice-selftest <model.bin> <audio.wav> "save replay|сделай реплей"
+Build release packages:
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_release.ps1
 ```
 
 ---
 
-## Где что лежит
+<a id="russian"></a>
+## Русский
 
-| Путь | Что внутри |
-|---|---|
-| `frontend/utility/AkvariumVoice.*` | движок распознавания, WASAPI-захват, настройки голоса |
-| `frontend/utility/AkvariumPhraseMatch.hpp` | устойчивое к ошибкам сопоставление фраз |
-| `frontend/utility/AkvariumSceneAudio.*` | снимки микшера на сцену |
-| `frontend/docks/AkvariumAppScenes.*` | док привязки сцен к приложениям |
-| `frontend/utility/AkvariumImport.*` | импорт профилей OBS при первом запуске |
-| `libobs/` | хранение per-scene аудио-состояния в JSON сцены |
-| `deps/whisper.cpp` | вендоренный движок распознавания |
-| `packaging/` | NSIS-установщик, portable zip, README по релизам |
-| `packaging/branding/` | баннеры, генератор `make-banner.py` |
+[Switch to English](#english)
 
-Подробное техническое описание фич, настроек и ограничений — в
-[README.AkvariumOBS.md](README.AkvariumOBS.md). Документация апстрима OBS — в
-[README.rst](README.rst) и на [obsproject.com/docs](https://obsproject.com/docs).
+### Что это
+
+AkvariumOBS — не плагин и не обёртка, а полноценный форк исходников OBS Studio 32.2.2.
+Четыре возможности для стримов и записи геймплея, которых нет в обычном OBS:
+
+| | Возможность | Зачем |
+|---|---|---|
+| 🎙 | **Голосовые команды для Replay Buffer** | Сказать «откати это» или «save replay» вместо хоткея — распознавание полностью офлайн |
+| 🔊 | **Звуковое оповещение клипа** | Проигрывание выбранного звука при каждом сохранении реплея (по голосу, кнопке или хоткею) |
+| 🎚 | **Состояние микшера на сцену** | Микрофон заглушён в одной сцене и активен в другой, автоматически при переключении |
+| 🪟 | **Привязка сцен к приложениям** | Сцена меняется, когда игра в фокусе, свернулась или закрылась |
+
+Продуктовое имя, заголовок окна, `AkvariumOBS.exe`, версионный ресурс Windows, иконки
+(exe, окно, трей) и тексты своего UI перебрендированы. Внутренние идентификаторы OBS,
+пути конфигов и ABI плагинов не тронуты — сторонние плагины и профили апстрима работают как раньше.
 
 ---
 
-## Совместимость
+### Возможности
 
-- Только **Windows x64**; сборка под Linux/macOS не поддерживается.
-- Версия-база — OBS Studio **32.2.2**, плагины, собранные под неё, грузятся без пересборки.
-- Конфиги, профили и коллекции сцен полностью совместимы с OBS Studio: можно ходить
-  туда-обратно между приложениями.
-- Для GPU-офлоада whisper нужен рабочий Vulkan-драйвер; без него распознавание идёт на CPU.
+#### 🎙 Голосовые команды для Replay Buffer
+
+**Настройки → Вывод → Replay Buffer → Voice Commands (Replay Buffer)**
+
+- **Архитектура Medal:** Распознавание на базе `whisper.cpp` со встроенной моделью `base-q8_0`. Занимает всего ~75 МБ RAM, инференс ~80 мс. Работает полностью локально без интернета.
+- **Мастер тренировки фразы (5 сэмплов):** Нажмите **"Train new phrase (5 samples)"**, произнесите фразу 5 раз с подсказками VAD. Система автоматически сохранит вариации произношения в словарь.
+- **Удобные теги фраз:** Фразы отображаются кнопками-плашками с удалением в один клик (`[ ✕ фраза ]`).
+- **Keyword Biasing:** Динамический `initial_prompt` с вашими фразами подсказывает Whisper приоритетные слова, предотвращая ошибки даже при шуме или неидеальной дикции.
+- **Защита от ложных срабатываний:** VAD-обрезка тишины, лимит длительности и умная фильтрация отсекают разговоры в Discord, музыку и звуки игры.
+- **Проверка микрофона:** Кнопка **"Test recognition"** показывает точность сопоставления в реальном времени.
+
+#### 🔊 Звук сохранения реплея
+
+**Настройки → Вывод → Replay Buffer → Replay Sound (Replay Buffer)**
+
+- Поддерживаются `.wav`, `.mp3` и `.wma` файлы в папке `%APPDATA%\obs-studio\AkvariumOBS\sounds` (или `config\AkvariumOBS\sounds` в portable-режиме).
+- Звук проигрывается на стандартное устройство вывода Windows при любом сохранении клипа (по голосу, горячей клавише или кнопке в OBS), попадая в захват звука рабочего стола на стриме.
+- Отдельный ползунок громкости и кнопка прослушивания.
+
+#### 🎚 Состояние микшера на сцену
+
+- При переключении сцены состояние уходящей сцены сохраняется в её JSON, состояние входящей — применяется. Охвачены все источники из Audio Mixer, включая глобальные устройства (`Mic/Aux`, `Desktop Audio`).
+- Правый клик по сцене:
+  - **Remember volume and mute for this scene** — включить/выключить запоминание для сцены;
+  - **Capture current audio state for this scene** — сохранить текущий снимок.
+
+#### 🪟 Привязка сцен к приложениям
+
+Док **Scene Binding to Applications** (справа):
+- Правило — это exe, условие (`In foreground`, `Running`, `Running but not in foreground`, `Not running / closed`), целевая сцена и флаг «включено».
+- Правила проверяются каждые 700 мс.
+
+---
+
+### Установка
+
+Готовые релизные пакеты:
+
+```text
+AkvariumOBS-1.1-Windows-x64-Installer.exe   установщик (NSIS, LZMA)
+AkvariumOBS-1.1-Windows-x64-Portable.zip    портативная сборка
+```
+
+- **Установщик:** Ставит в выбранную папку, прописывает `HKLM\Software\AkvariumOBS`, добавляет пункт в «Удаление программ» и ярлыки. Тихая установка: `installer.exe /S /D=D:\path`.
+- **Portable:** Распакуйте в любую папку и запустите `bin\64bit\AkvariumOBS.exe`. Флаг `--portable` хранит настройки локально в `.\config`.
+- В сборку уже вложены модель речи `ggml-base-q8_0.bin`, VC++ runtime, OpenMP и Vulkan loader.
+
+---
+
+### Быстрый старт
+
+1. Настройки → Вывод → включить Replay Buffer, открыть **Voice Commands**.
+2. Включить чекбокс **Enable voice commands for Replay Buffer**.
+3. Нажать **"Train new phrase (5 samples)"**, ввести `откати это` или `save replay` и произнести фразу 5 раз.
+4. Микрофон оставить на **Auto** (следует за микрофоном активной сцены).
+5. Запустить Replay Buffer и произнести команду!
+
+---
+
+### Сборка из исходников
+
+Требования:
+- Visual Studio 2022 Build Tools (**Desktop development with C++** и **C++ ATL**)
+- Windows 11 SDK 10.0.26100
+- CMake 3.28+ (генератор Visual Studio 17 2022)
+
+```bash
+cmake -S . -B build_x64 -G "Visual Studio 17 2022" -A x64 -DENABLE_BROWSER=ON
+cmake --build build_x64 --config RelWithDebInfo --parallel
+```
+
+Тесты сопоставления:
+```bash
+cmake --build build_x64 --config RelWithDebInfo --target akvarium-phrase-match-test
+build_x64\rundir\RelWithDebInfo\bin\64bit\akvarium-phrase-match-test.exe
+```
+
+Сборка инсталлятора и portable:
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_release.ps1
+```
 
 ---
 
 ## Лицензия
 
-GPLv2, как и OBS Studio. Оригинальные copyright-уведомления и `COPYING` сохранены,
-`About` указывает форк и версию апстрима. Поскольку проект под GPLv2, при распространении
-бинарников исходники должны быть доступны.
+GPLv2, как и OBS Studio. Исходный код доступен в соответствии с требованиями лицензии.
 
-Благодарности: [OBS Studio](https://obsproject.com) — база форка,
-[whisper.cpp](https://github.com/ggml-org/whisper.cpp) — распознавание речи,
-[Qt](https://www.qt.io) и [CEF](https://github.com/chromiumembedded/cef) — то, на чём стоит фронтенд.
+Благодарности:
+- [OBS Studio](https://obsproject.com) — основа форка;
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) — офлайн-распознавание речи;
+- [Qt](https://www.qt.io) и [CEF](https://github.com/chromiumembedded/cef) — графический интерфейс и браузерные источники.

@@ -41,21 +41,22 @@ Run the build: `build_x64/rundir/RelWithDebInfo/bin/64bit/AkvariumOBS.exe --port
 
 Settings → Output → Replay Buffer → **Voice Commands (Replay Buffer)**.
 
-- One phrase per line, Russian or English. Nothing else has to be tuned.
-- Pick a model preset (`Fast`/`Balanced`/`Accurate`) and press **Download / verify model**
-  once. Models are stored in `<config>/AkvariumOBS/voice/`.
-- Microphone: *Auto* follows the active audio-capture source of the current scene,
-  a specific OBS source, or any Windows input/output device (output = loopback).
-- With *Listen only while the Replay Buffer is running* (default) the engine is idle
-  unless the buffer is active.
-
-Latency is preset, not user-tuned: WASAPI capture at 16 kHz mono with an adaptive
-noise gate, a 350 ms speech tail, and whisper running with half of the logical CPU
-cores (`audio_ctx 768`, greedy, no context). Measured 0.7 s recognition for a 1.4 s
-command on a Ryzen 5 5500; the model stays loaded between replay buffer runs.
-
-Command matching tolerates recognition errors (`сделай реплеи` matches `сделай реплей`,
-`safe replay` matches `save replay`) and rejects long unrelated speech.
+- **5-sample enrollment wizard:** click "Train new phrase (5 samples)" — speak your phrase 5 times with guided VAD pacing. The engine stores pronunciation variations and automatically adds the phrase to your active triggers.
+- **Pill tag phrase management:** active trigger phrases are displayed as visual pill badges with one-click deletion (`[ ✕ phrase ]`).
+- **Initial prompt keyword biasing:** Whisper is prompted with active phrases so recognition accuracy is sharp even in loud game environments.
+- **On-the-spot verification:** click "Test recognition" to test your microphone and verify matching in real-time.
+- **Morphology and word forms:** supports natural Russian verb/noun forms ("откат" / "откати" / "откатить", "сохрани" / "сохранить", "клип" / "клипни" / "заклипай") and English commands ("save replay", "clip that").
+- **False positive prevention:**
+  - Conversational speech isolation: mentioning a trigger word inside long speech or Discord banter is filtered out.
+  - Subtitle / caption artifact filter.
+  - Duplicate trigger cooldown: 2.5 second lockout.
+- **First-try reliability:**
+  - Adaptive VAD: background noise is tracked continuously, and a 250 ms pre-buffer prevents clipped initial consonants.
+  - Natural speech pauses: utterance end gap is set to 450 ms so multi-word commands are never split in half.
+  - Full-size Whisper context (`audio_ctx = 0`) and compact `base-q8_0` model (~82 MB) for low latency (~80 ms) and minimal memory footprint (~75 MB RAM).
+- **Sensitivity slider:** 1 (loud room) to 5 (whisper / quiet voice), default 3.
+- Microphone: *Auto* follows the active audio-capture source of the current scene, or any chosen WASAPI input/output device.
+- *Listen only while Replay Buffer is running* ensures zero CPU overhead when the buffer is not running.
 
 ## Replay clip sound
 
@@ -108,9 +109,9 @@ switch only when the matched rule changes. Rules are stored in `user.ini`
 cmake --build build_x64 --config RelWithDebInfo --target akvarium-phrase-match-test
 build_x64/frontend/RelWithDebInfo/akvarium-phrase-match-test.exe
 
-# recognition on a WAV file
+# recognition on a WAV file: audio gate, decode confidence, phrase score
 cmake --build build_x64 --config RelWithDebInfo --target akvarium-voice-selftest
-akvarium-voice-selftest <model.bin> <audio.wav> "save replay|сделай реплей"
+akvarium-voice-selftest <model.bin> <audio.wav> "save replay|сделай реплей" [ru|en|auto]
 
 # clip sound: folder discovery, config round-trip, MCI playback
 cmake --build build_x64 --config RelWithDebInfo --target akvarium-replay-sound-test
