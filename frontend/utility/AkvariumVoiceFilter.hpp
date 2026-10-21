@@ -59,8 +59,8 @@ inline AudioSegmentStats AnalyzeAudioSegment(const float *data, size_t count, do
 	return stats;
 }
 
-/* Removes DC / sub-60Hz rumble and applies clean automatic gain control
-   so headset microphones deliver a healthy signal level to Whisper. */
+/* Removes DC / sub-60Hz rumble and applies controlled automatic gain control
+   ONLY to genuine speech, never amplifying quiet ambient background. */
 inline void PrepareForWhisper(std::vector<float> &pcm)
 {
 	if (pcm.empty())
@@ -81,24 +81,71 @@ inline void PrepareForWhisper(std::vector<float> &pcm)
 	for (float sample : pcm)
 		peak = std::max(peak, std::fabs(sample));
 
-	/* Boost quiet microphone input up to +18 dB (target peak ~0.65) */
-	if (peak > 1e-4f && peak < 0.20f) {
-		const float gain = std::min(8.0f, 0.65f / peak);
+	/* Only apply moderate boost if signal is genuine speech (peak >= 0.030).
+	   Never boost sub-threshold noise or background bleed. Max gain 2.5x (+8 dB). */
+	if (peak >= 0.030f && peak < 0.25f) {
+		const float gain = std::min(2.5f, 0.50f / peak);
 		for (float &sample : pcm)
 			sample *= gain;
 	}
 }
 
-/* Rejects pure silence, electrical clicks, and empty buffers.
-   Does NOT reject natural speech based on arbitrary ZCR or duration limits. */
-inline bool SegmentLooksLikeSpeech(const AudioSegmentStats &stats)
+/* Rejects non-speech audio: pure silence, electrical clicks, breaths, keyboard clatter,
+   and quiet background noise across the room. */
+inline bool SegmentLooksLikeSpeech(const AudioSegmentStats &stats, int sensitivity = 3)
 {
-	if (stats.frames < 10) /* minimum 200 ms */
+	/* Speech command duration bounds:
+	   Minimum ~360 ms (18 frames at 20 ms), maximum 3.5 s (175 frames).
+	   A click, pop or breath is < 200 ms; long conversation is > 3.5 s. */
+	if (stats.frames < 18 || stats.frames > 175)
 		return false;
-	if (stats.peak < 0.003) /* pure silence */
+
+	/* Active speech energy bounds based on sensitivity */
+	double minPeak = 0.030;
+	double minRms = 0.005;
+	double minActiveMs = 180.0;
+
+	switch (sensitivity) {
+	case 1: /* Low (loud room / reject background voice & bleed) */
+		minPeak = 0.050;
+		minRms = 0.010;
+		minActiveMs = 220.0;
+		break;
+	case 2: /* Medium-Low */
+		minPeak = 0.038;
+		minRms = 0.007;
+		minActiveMs = 200.0;
+		break;
+	case 4: /* Medium-High */
+		minPeak = 0.020;
+		minRms = 0.0035;
+		minActiveMs = 160.0;
+		break;
+	case 5: /* High (quiet voice) */
+		minPeak = 0.012;
+		minRms = 0.0020;
+		minActiveMs = 140.0;
+		break;
+	case 3: /* Normal / recommended */
+	default:
+		minPeak = 0.030;
+		minRms = 0.005;
+		minActiveMs = 180.0;
+		break;
+	}
+
+	if (stats.peak < minPeak)
 		return false;
-	if (stats.rms < 0.0008)
+	if (stats.rms < minRms)
 		return false;
+	if (stats.activeMs < minActiveMs)
+		return false;
+
+	/* Active speech must make up at least 20% of the buffer (not a single spike in silence) */
+	const double totalMs = (double)stats.frames * 20.0;
+	if (totalMs > 0.0 && (stats.activeMs / totalMs) < 0.20)
+		return false;
+
 	return true;
 }
 

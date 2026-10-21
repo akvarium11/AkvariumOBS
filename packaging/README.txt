@@ -1,5 +1,5 @@
-AkvariumOBS 1.1 (Windows x64)
-===========================
+AkvariumOBS 1.1a (Windows x64)
+============================
 
 Fork of OBS Studio 32.2.2 (GPLv2) with:
   - voice commands for the Replay Buffer (offline recognition, CPU or GPU);

@@ -460,7 +460,7 @@ QString VoiceEngine::TestRecognize(const QString &wavPath, const QStringList &ph
 	if (transcriptOut)
 		*transcriptOut = text;
 
-	if (IsLikelyHallucination(text) || confidence.noSpeechProb > 0.65)
+	if (IsLikelyHallucination(text) || confidence.noSpeechProb > 0.45)
 		return QString();
 
 	for (const QString &phrase : phrases) {
@@ -676,24 +676,24 @@ double VoiceEngine::SpeechStartThreshold() const
 {
 	/* Sensitivity 1 (low) .. 5 (high) */
 	switch (m_config.sensitivity) {
-	case 1:
-		return std::max(0.0080, m_noiseFloor * 3.5);
-	case 2:
-		return std::max(0.0055, m_noiseFloor * 2.8);
-	case 4:
-		return std::max(0.0025, m_noiseFloor * 1.8);
-	case 5:
-		return std::max(0.0018, m_noiseFloor * 1.4);
-	case 3:
+	case 1: /* Low (loud room / close voice: rejects background speech & bleed) */
+		return std::max(0.040, m_noiseFloor * 4.5);
+	case 2: /* Medium-Low */
+		return std::max(0.024, m_noiseFloor * 3.5);
+	case 4: /* Medium-High */
+		return std::max(0.009, m_noiseFloor * 2.0);
+	case 5: /* High (quiet voice) */
+		return std::max(0.004, m_noiseFloor * 1.5);
+	case 3: /* Normal (recommended) */
 	default:
-		return std::max(0.0035, m_noiseFloor * 2.2);
+		return std::max(0.016, m_noiseFloor * 2.8);
 	}
 }
 
 double VoiceEngine::SpeechEndThreshold() const
 {
 	const double start = SpeechStartThreshold();
-	return std::max(0.0015, start * 0.55);
+	return std::max(0.0025, start * 0.50);
 }
 
 QString VoiceEngine::ResolveLanguage() const
@@ -998,7 +998,7 @@ void VoiceEngine::Feed(const float *data, size_t frames, int channels)
 void VoiceEngine::FinalizeSegment(std::vector<float> &segment)
 {
 	const AudioSegmentStats stats = AnalyzeAudioSegment(segment.data(), segment.size(), SpeechEndThreshold());
-	if (SegmentLooksLikeSpeech(stats)) {
+	if (SegmentLooksLikeSpeech(stats, m_config.sensitivity)) {
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (m_pendingQueue.size() >= 3)
 			m_pendingQueue.erase(m_pendingQueue.begin());
@@ -1034,12 +1034,13 @@ QString VoiceEngine::DecodeWith(whisper_context *ctx, const std::vector<float> &
 	params.temperature = 0.0f;
 	params.max_tokens = 32;
 	params.no_timestamps = true;
-	params.no_speech_thold = 0.65f;
+	params.no_speech_thold = 0.40f;
+	params.logprob_thold = -1.0f;
+	params.entropy_thold = 2.4f;
 	params.audio_ctx = 0;         /* Default full context (1500) preserves maximum accuracy */
 
-	const QString promptStr = BuildPrompt();
-	const QByteArray promptBytes = promptStr.toUtf8();
-	params.initial_prompt = promptBytes.isEmpty() ? nullptr : promptBytes.constData();
+	/* Do NOT use initial_prompt in live recognition - causes phantom hallucinations on silence */
+	params.initial_prompt = nullptr;
 
 	const QByteArray lang = ResolveLanguage().toUtf8();
 	params.language = lang.constData();
@@ -1102,8 +1103,14 @@ void VoiceEngine::InferenceLoop()
 		DecodeConfidence confidence;
 		const QString text = DecodeWith(m_ctx, audio, &confidence);
 
-		if (text.isEmpty() || confidence.noSpeechProb > 0.65 || IsLikelyHallucination(text))
+		/* Drop silence, low-confidence decodes, and hallucinations */
+		if (text.isEmpty() ||
+		    confidence.noSpeechProb > 0.45 ||
+		    (confidence.tokens >= 2 && confidence.meanTokenProb < 0.55) ||
+		    (confidence.tokens >= 1 && confidence.minTokenProb < 0.15) ||
+		    IsLikelyHallucination(text)) {
 			continue;
+		}
 
 		QMetaObject::invokeMethod(this, [this, text]() { HandleTranscript(text); }, Qt::QueuedConnection);
 	}

@@ -25,7 +25,7 @@
 namespace akvarium {
 
 /* Minimum score a phrase needs before it fires a command. */
-constexpr double kPhraseMatchThreshold = 0.70;
+constexpr double kPhraseMatchThreshold = 0.78;
 
 inline QString NormalizePhraseText(QString text)
 {
@@ -260,15 +260,15 @@ inline PhraseMatchResult MatchPhrase(const QString &phrase, const QString &trans
 	if (m > n + maxExtraWords)
 		return result;
 
-	/* For single-word commands, verify that any extra words are not conversational pronouns/particles
-	   like "у него откат", "мой откат", "где клип". */
+	/* For single-word commands, reject if any non-filler extra words are present
+	   (e.g. "мой откат", "был откат", "у него откат", "где клип"). */
 	if (n == 1 && m > 1) {
 		int nonFillers = 0;
 		for (const QString &w : got) {
 			if (PhraseWordSimilarity(w, want.first()) == 0.0 && !IsCommandFillerWord(w))
 				nonFillers++;
 		}
-		if (nonFillers > 1)
+		if (nonFillers > 0)
 			return result;
 	}
 
