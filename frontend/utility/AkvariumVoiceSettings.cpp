@@ -8,6 +8,7 @@
 ******************************************************************************/
 
 #include "AkvariumVoiceSettings.hpp"
+#include "AkvariumPhraseMatch.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -104,11 +105,13 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 	form->addRow(QStringLiteral("Enrolled phrases:"), m_phrasesScroll);
 
 	auto *btnRow = new QHBoxLayout();
-	m_trainBtn = new QPushButton(QStringLiteral("➕ Train new phrase (5 samples)"), this);
-	m_testBtn = new QPushButton(QStringLiteral("🎙️ Test recognition"), this);
+	m_addBtn = new QPushButton(QStringLiteral("➕ Add phrase"), this);
+	m_trainBtn = new QPushButton(QStringLiteral("🎙️ Train by voice"), this);
+	m_testBtn = new QPushButton(QStringLiteral("🎧 Test mic"), this);
 	m_cancelBtn = new QPushButton(QStringLiteral("⏹ Cancel"), this);
 	m_cancelBtn->setVisible(false);
 
+	btnRow->addWidget(m_addBtn);
 	btnRow->addWidget(m_trainBtn);
 	btnRow->addWidget(m_testBtn);
 	btnRow->addWidget(m_cancelBtn);
@@ -154,6 +157,7 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 	});
 
 	connect(m_downloadBtn, &QPushButton::clicked, this, [this]() { DownloadModel(); });
+	connect(m_addBtn, &QPushButton::clicked, this, [this]() { AddPhraseManual(); });
 	connect(m_trainBtn, &QPushButton::clicked, this, [this]() { StartTrainingPhrase(); });
 	connect(m_testBtn, &QPushButton::clicked, this, [this]() { StartTestingPhrase(); });
 	connect(m_cancelBtn, &QPushButton::clicked, this, [this]() { CancelCurrentOperation(); });
@@ -181,10 +185,11 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 
 		connect(engine, &VoiceEngine::PhraseTestFinished, this,
 			[this](bool matched, const QString &heardText, const QString &matchedPhrase, double score) {
+				m_addBtn->setEnabled(true);
 				m_trainBtn->setEnabled(true);
 				m_testBtn->setEnabled(true);
 				m_cancelBtn->setVisible(false);
-				m_testBtn->setText(QStringLiteral("🎙️ Test recognition"));
+				m_testBtn->setText(QStringLiteral("🎧 Test mic"));
 
 				if (heardText.isEmpty()) {
 					m_recordFeedback->setText(QStringLiteral("⚠️ Audio not recognized."));
@@ -223,6 +228,7 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 
 		connect(engine, &VoiceEngine::SampleCollectionFinished, this,
 			[this](const QString &phrase, const QStringList &learnedVariants) {
+				m_addBtn->setEnabled(true);
 				m_trainBtn->setEnabled(true);
 				m_testBtn->setEnabled(true);
 				m_cancelBtn->setVisible(false);
@@ -438,6 +444,23 @@ void VoiceCommandSettings::Save()
 			++it;
 	}
 
+	/* Auto-expand common acoustic, morphological and unglued variants for all active phrases */
+	for (const QString &p : cfg.phrases) {
+		for (const QString &av : akvarium::GenerateAcousticVariants(p)) {
+			bool exists = false;
+			for (const auto &alias : cfg.aliases) {
+				if (alias.first.compare(p, Qt::CaseInsensitive) == 0 &&
+				    alias.second.compare(av, Qt::CaseInsensitive) == 0) {
+					exists = true;
+					break;
+				}
+			}
+			if (!exists) {
+				cfg.aliases.append(qMakePair(p, av));
+			}
+		}
+	}
+
 	cfg.micSource = m_mic->currentData().toString();
 	cfg.sensitivity = m_sensitivity->value();
 	cfg.onlyWithReplayBuffer = m_onlyReplayBuffer->isChecked();
@@ -502,6 +525,30 @@ void VoiceCommandSettings::DownloadModel()
 	engine->DownloadMissingModels();
 }
 
+void VoiceCommandSettings::AddPhraseManual()
+{
+	bool ok = false;
+	const QString text = QInputDialog::getText(
+		this,
+		QStringLiteral("Add Phrase (Text)"),
+		QStringLiteral("Enter command phrase to enroll (e.g. \"клипни это\", \"откати это\", \"save replay\"):"),
+		QLineEdit::Normal,
+		QString(),
+		&ok);
+
+	if (!ok || text.trimmed().isEmpty())
+		return;
+
+	const QString phrase = text.trimmed();
+	if (!m_phraseList.contains(phrase, Qt::CaseInsensitive)) {
+		m_phraseList.append(phrase);
+		Save();
+		RebuildPhraseButtons();
+		m_recordFeedback->setText(
+			QStringLiteral("✅ Added phrase \"%1\" with auto-generated acoustic variations.").arg(phrase));
+	}
+}
+
 void VoiceCommandSettings::StartTrainingPhrase()
 {
 	auto *engine = VoiceEngine::Instance();
@@ -517,7 +564,7 @@ void VoiceCommandSettings::StartTrainingPhrase()
 	const QString phrase = QInputDialog::getText(
 		this,
 		QStringLiteral("Train Voice Phrase"),
-		QStringLiteral("Enter the phrase to train (you will speak it 5 times):"),
+		QStringLiteral("Enter phrase to train (you can also train an existing phrase for more samples):"),
 		QLineEdit::Normal,
 		QString(),
 		&ok);
@@ -527,13 +574,23 @@ void VoiceCommandSettings::StartTrainingPhrase()
 
 	const QString cleanPhrase = phrase.trimmed();
 
+	const int sampleCount = QInputDialog::getInt(
+		this,
+		QStringLiteral("Training Samples"),
+		QStringLiteral("Number of vocal repetitions to record:"),
+		5, 3, 25, 1, &ok);
+
+	if (!ok)
+		return;
+
+	m_addBtn->setEnabled(false);
 	m_trainBtn->setEnabled(false);
 	m_testBtn->setEnabled(false);
 	m_cancelBtn->setVisible(true);
 	m_recordFeedback->setText(
 		QStringLiteral("🎓 Waiting for speech: Say \"%1\" into microphone...").arg(cleanPhrase));
 
-	engine->StartSampleCollection(cleanPhrase, 5);
+	engine->StartSampleCollection(cleanPhrase, sampleCount);
 }
 
 void VoiceCommandSettings::StartTestingPhrase()
@@ -547,6 +604,7 @@ void VoiceCommandSettings::StartTestingPhrase()
 		return;
 	}
 
+	m_addBtn->setEnabled(false);
 	m_trainBtn->setEnabled(false);
 	m_testBtn->setEnabled(false);
 	m_cancelBtn->setVisible(true);
@@ -560,6 +618,7 @@ void VoiceCommandSettings::CancelCurrentOperation()
 		engine->CancelSampleCollection();
 		engine->CancelPhraseRecording();
 	}
+	m_addBtn->setEnabled(true);
 	m_trainBtn->setEnabled(true);
 	m_testBtn->setEnabled(true);
 	m_cancelBtn->setVisible(false);

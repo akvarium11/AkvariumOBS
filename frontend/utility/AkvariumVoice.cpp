@@ -1649,6 +1649,20 @@ void VoiceEngine::RunSampleCollection(const QString &phrase, int totalSamples)
 				}
 			}
 		}
+		/* Auto-expand common acoustic, unglued, and morphological variants */
+		for (const QString &av : akvarium::GenerateAcousticVariants(phrase)) {
+			bool exists = false;
+			for (const auto &p : cfg.aliases) {
+				if (p.first.compare(phrase, Qt::CaseInsensitive) == 0 &&
+				    p.second.compare(av, Qt::CaseInsensitive) == 0) {
+					exists = true;
+					break;
+				}
+			}
+			if (!exists) {
+				cfg.aliases.append(qMakePair(phrase, av));
+			}
+		}
 		SaveConfig(cfg);
 	}
 

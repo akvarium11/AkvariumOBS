@@ -77,8 +77,8 @@ Dock panel **Scene Binding to Applications** (right sidebar):
 Official release packages:
 
 ```text
-AkvariumOBS-1.1a-Windows-x64-Installer.exe   Windows NSIS Installer (solid LZMA)
-AkvariumOBS-1.1a-Windows-x64-Portable.zip    Portable standalone archive
+AkvariumOBS-1.1b-Windows-x64-Installer.exe   Windows NSIS Installer (solid LZMA)
+AkvariumOBS-1.1b-Windows-x64-Portable.zip    Portable standalone archive
 ```
 
 - **Installer:** Installs to `Program Files\AkvariumOBS`, registers shortcuts, uninstaller in Windows Settings. Silent mode: `installer.exe /S /D=D:\path`.
@@ -186,8 +186,8 @@ AkvariumOBS — не плагин и не обёртка, а полноценн�
 Готовые релизные пакеты:
 
 ```text
-AkvariumOBS-1.1a-Windows-x64-Installer.exe   установщик (NSIS, LZMA)
-AkvariumOBS-1.1a-Windows-x64-Portable.zip    портативная сборка
+AkvariumOBS-1.1b-Windows-x64-Installer.exe   установщик (NSIS, LZMA)
+AkvariumOBS-1.1b-Windows-x64-Portable.zip    портативная сборка
 ```
 
 - **Установщик:** Ставит в выбранную папку, прописывает `HKLM\Software\AkvariumOBS`, добавляет пункт в «Удаление программ» и ярлыки. Тихая установка: `installer.exe /S /D=D:\path`.

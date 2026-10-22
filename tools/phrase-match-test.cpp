@@ -58,6 +58,12 @@ int main()
 	check("откати это", "откочи это", true);
 	check("откати это", "откачи это", true);
 	check("откати это", "откатить это", true);
+	check("откати это", "откатиэто", true);
+	check("откати это", "откатьеэто", true);
+	check("клипни это", "кликниэто", true);
+	check("клипни это", "кликни это", true);
+	check("клипни это", "клипниэто", true);
+	check("клипни это", "клипни то", true);
 	check("сохрани клип", "сохранить клип", true);
 	check("сохрани клип", "сохраняй клип", true);
 	check("клип", "клипни", true);
@@ -83,10 +89,12 @@ int main()
 	check("save replay", "Save replay.", true);
 	check("save replay", "please save the replay", true);
 	check("save replay", "save a replay", true);
+	check("save replay", "savereplay", true);
 	check("save replay", "the weather is really nice today and I think we should go outside", false);
 	check("save replay", "safe replay", true);
 	check("save replay", "save", false);
 	check("save replay", "I saved the replay of that match yesterday and it was fine", false);
+	check("clip that", "clipthat", true);
 
 	/* Commands surrounded by minimal filler */
 	check("реплей", "сделай реплей", true);

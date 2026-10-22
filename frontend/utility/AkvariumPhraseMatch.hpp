@@ -79,9 +79,63 @@ inline int PhraseEditDistance(const QString &a, const QString &b)
 	return dp[n][m];
 }
 
+/* Splits clitic particles and pronouns that whisper.cpp frequently glues to verbs without spaces:
+   "кликниэто" -> "кликни это", "откатиэто" -> "откати это", "clipthat" -> "clip that" */
+inline QString UnglueClitics(const QString &word)
+{
+	if (word.size() >= 5) {
+		/* Russian glued "...это" -> "... это" (e.g. "клипниэто", "кликниэто", "откатиэто") */
+		if (word.endsWith(QStringLiteral("это")) && word.size() >= 6) {
+			const QString prefix = word.left(word.size() - 3);
+			return prefix + QChar(' ') + QStringLiteral("это");
+		}
+		/* Russian glued "...то" -> "... то" */
+		if (word.endsWith(QStringLiteral("то")) && word.size() >= 6 &&
+		    word != QStringLiteral("вместо") && word != QStringLiteral("часто") &&
+		    word != QStringLiteral("густо") && word != QStringLiteral("пусто") &&
+		    word != QStringLiteral("просто") && word != QStringLiteral("чисто") &&
+		    word != QStringLiteral("круто") && word != QStringLiteral("брутто")) {
+			const QString prefix = word.left(word.size() - 2);
+			return prefix + QChar(' ') + QStringLiteral("то");
+		}
+		/* Russian glued "...ка" -> "... ка" */
+		if (word.endsWith(QStringLiteral("ка")) && word.size() >= 6 &&
+		    (word.startsWith(QStringLiteral("откат")) || word.startsWith(QStringLiteral("клип")) ||
+		     word.startsWith(QStringLiteral("клик")) || word.startsWith(QStringLiteral("сохран")) ||
+		     word.startsWith(QStringLiteral("запис")))) {
+			const QString prefix = word.left(word.size() - 2);
+			return prefix + QChar(' ') + QStringLiteral("ка");
+		}
+		/* English glued pronouns */
+		if (word.endsWith(QStringLiteral("that")) && word.size() >= 7) {
+			const QString prefix = word.left(word.size() - 4);
+			return prefix + QChar(' ') + QStringLiteral("that");
+		}
+		if (word.endsWith(QStringLiteral("replay")) && word.size() >= 9) {
+			const QString prefix = word.left(word.size() - 6);
+			return prefix + QChar(' ') + QStringLiteral("replay");
+		}
+		if (word.endsWith(QStringLiteral("this")) && word.size() >= 7) {
+			const QString prefix = word.left(word.size() - 4);
+			return prefix + QChar(' ') + QStringLiteral("this");
+		}
+	}
+	return word;
+}
+
 inline QStringList PhraseWords(const QString &text)
 {
-	return NormalizePhraseText(text).split(QChar(' '), Qt::SkipEmptyParts);
+	const QStringList raw = NormalizePhraseText(text).split(QChar(' '), Qt::SkipEmptyParts);
+	QStringList words;
+	for (const QString &w : raw) {
+		const QString unglued = UnglueClitics(w);
+		if (unglued.contains(QChar(' '))) {
+			words.append(unglued.split(QChar(' '), Qt::SkipEmptyParts));
+		} else {
+			words.append(unglued);
+		}
+	}
+	return words;
 }
 
 /* Russian and English stemmer for command verbs and nouns:
@@ -111,12 +165,12 @@ inline QString WordStem(const QString &word)
 		return w;
 	}
 
-	/* Russian command prefixes (e.g. "заклипай" -> "клипай") */
-	if (w.startsWith(QStringLiteral("заклип")) && w.size() >= 7)
+	/* Russian command prefixes (e.g. "заклипай" -> "клипай", "закликай" -> "кликай") */
+	if ((w.startsWith(QStringLiteral("заклип")) || w.startsWith(QStringLiteral("заклик"))) && w.size() >= 7)
 		w = w.mid(2);
 
-	/* Russian verb "клипни" / "клипнуть" -> "клип" */
-	if (w.startsWith(QStringLiteral("клипн")) && w.size() >= 6)
+	/* Russian verbs "клипни" / "клипнуть" / "кликни" / "кликнуть" -> "клип" */
+	if ((w.startsWith(QStringLiteral("клипн")) || w.startsWith(QStringLiteral("кликн"))) && w.size() >= 6)
 		return QStringLiteral("клип");
 
 	/* Russian suffixes sorted by length descending */
@@ -153,8 +207,11 @@ inline QString WordStem(const QString &word)
 	/* Special phonetic/morphological normalizations */
 	if (w == QStringLiteral("запиш"))
 		w = QStringLiteral("запис");
-	else if (w == QStringLiteral("откач") || w == QStringLiteral("откоч") || w == QStringLiteral("откот"))
+	else if (w == QStringLiteral("откач") || w == QStringLiteral("откоч") || w == QStringLiteral("откот") ||
+		 w == QStringLiteral("откоть") || w == QStringLiteral("откать") || w == QStringLiteral("откоти"))
 		w = QStringLiteral("откат");
+	else if (w == QStringLiteral("клик") && word.size() > 4)
+		w = QStringLiteral("клип");
 
 	return w;
 }
@@ -182,6 +239,18 @@ inline double PhraseWordSimilarity(const QString &heard, const QString &expected
 	/* English common whisper acoustic confusion */
 	if ((heard == QStringLiteral("safe") && expected == QStringLiteral("save")) ||
 	    (heard == QStringLiteral("save") && expected == QStringLiteral("safe")))
+		return 0.90;
+
+	/* Russian command pronoun interchangeability: "это" <-> "то" */
+	if ((heard == QStringLiteral("то") && expected == QStringLiteral("это")) ||
+	    (heard == QStringLiteral("это") && expected == QStringLiteral("то")))
+		return 0.90;
+
+	/* English command pronoun interchangeability: "this" <-> "that", "it" <-> "that" */
+	if ((heard == QStringLiteral("this") && expected == QStringLiteral("that")) ||
+	    (heard == QStringLiteral("that") && expected == QStringLiteral("this")) ||
+	    (heard == QStringLiteral("it") && expected == QStringLiteral("that")) ||
+	    (heard == QStringLiteral("that") && expected == QStringLiteral("it")))
 		return 0.90;
 
 	/* Russian / English stem equality */
@@ -237,6 +306,103 @@ inline bool IsCommandFillerWord(const QString &word)
 		QStringLiteral("just"), QStringLiteral("that"), QStringLiteral("this"),
 	};
 	return fillers.contains(word);
+}
+
+/* Generates common whisper acoustic and morphological confusion aliases for commands:
+   "клипни это" -> "кликни это", "заклипай это", "клипниэто", "кликниэто", etc. */
+inline QStringList GenerateAcousticVariants(const QString &phrase)
+{
+	QStringList variants;
+	const QString p = NormalizePhraseText(phrase);
+	if (p.isEmpty())
+		return variants;
+
+	/* If phrase contains "клипни": add "кликни", "заклипай", "клип", etc. */
+	if (p.contains(QStringLiteral("клипни"))) {
+		QString v1 = p;
+		v1.replace(QStringLiteral("клипни"), QStringLiteral("кликни"));
+		variants << v1;
+		QString v2 = p;
+		v2.replace(QStringLiteral("клипни"), QStringLiteral("заклипай"));
+		variants << v2;
+		QString v3 = p;
+		v3.replace(QStringLiteral("клипни"), QStringLiteral("клип"));
+		variants << v3;
+	}
+	if (p.contains(QStringLiteral("кликни"))) {
+		QString v = p;
+		v.replace(QStringLiteral("кликни"), QStringLiteral("клипни"));
+		variants << v;
+	}
+	/* If phrase contains "откати": add "откатье", "откочи", "откачи", "откоти", "откатить" */
+	if (p.contains(QStringLiteral("откати"))) {
+		QString v1 = p;
+		v1.replace(QStringLiteral("откати"), QStringLiteral("откатье"));
+		variants << v1;
+		QString v2 = p;
+		v2.replace(QStringLiteral("откати"), QStringLiteral("откочи"));
+		variants << v2;
+		QString v3 = p;
+		v3.replace(QStringLiteral("откати"), QStringLiteral("откачи"));
+		variants << v3;
+		QString v4 = p;
+		v4.replace(QStringLiteral("откати"), QStringLiteral("откоти"));
+		variants << v4;
+		QString v5 = p;
+		v5.replace(QStringLiteral("откати"), QStringLiteral("откатить"));
+		variants << v5;
+	}
+	/* If phrase contains "сохрани": add "сохранить", "сохраняй" */
+	if (p.contains(QStringLiteral("сохрани"))) {
+		QString v1 = p;
+		v1.replace(QStringLiteral("сохрани"), QStringLiteral("сохранить"));
+		variants << v1;
+		QString v2 = p;
+		v2.replace(QStringLiteral("сохрани"), QStringLiteral("сохраняй"));
+		variants << v2;
+	}
+	/* If phrase contains "запиши": add "записать" */
+	if (p.contains(QStringLiteral("запиши"))) {
+		QString v1 = p;
+		v1.replace(QStringLiteral("запиши"), QStringLiteral("записать"));
+		variants << v1;
+	}
+	/* English variants */
+	if (p.contains(QStringLiteral("save replay"))) {
+		variants << QStringLiteral("safe replay");
+		variants << QStringLiteral("saved replay");
+		variants << QStringLiteral("savereplay");
+	}
+	if (p.contains(QStringLiteral("clip that"))) {
+		variants << QStringLiteral("clipthat");
+		variants << QStringLiteral("clipped that");
+		variants << QStringLiteral("clip this");
+		variants << QStringLiteral("clip it");
+	}
+
+	/* Also add glued forms with "это", "то", "that" */
+	QStringList extra;
+	for (const QString &item : QStringList(variants) + QStringList{p}) {
+		if (item.endsWith(QStringLiteral(" это"))) {
+			QString glued = item;
+			glued.replace(QStringLiteral(" это"), QStringLiteral("это"));
+			extra << glued;
+		}
+		if (item.endsWith(QStringLiteral(" то"))) {
+			QString glued = item;
+			glued.replace(QStringLiteral(" то"), QStringLiteral("то"));
+			extra << glued;
+		}
+		if (item.endsWith(QStringLiteral(" that"))) {
+			QString glued = item;
+			glued.replace(QStringLiteral(" that"), QStringLiteral("that"));
+			extra << glued;
+		}
+	}
+	variants.append(extra);
+	variants.removeDuplicates();
+	variants.removeAll(p);
+	return variants;
 }
 
 /* Aligns the phrase against the transcript, keeping word order.

@@ -45,6 +45,7 @@ private:
 	void RefreshMics();
 	void UpdateStatus();
 	void DownloadModel();
+	void AddPhraseManual();
 	void StartTrainingPhrase();
 	void StartTestingPhrase();
 	void CancelCurrentOperation();
@@ -64,6 +65,7 @@ private:
 	QWidget *m_phrasesContainer = nullptr;
 	QGridLayout *m_phrasesGrid = nullptr;
 
+	QPushButton *m_addBtn = nullptr;
 	QPushButton *m_trainBtn = nullptr;
 	QPushButton *m_testBtn = nullptr;
 	QPushButton *m_cancelBtn = nullptr;
