@@ -1,10 +1,10 @@
-# Full release build script for AkvariumOBS 1.1b
+# Full release build script for AkvariumOBS 1.2
 $ErrorActionPreference = "Stop"
 
 $repoRoot = $PSScriptRoot | Split-Path -Parent
 Set-Location $repoRoot
 
-$version = "1.1b"
+$version = "1.2"
 $releaseDir = Join-Path $repoRoot "release"
 $stageDir = Join-Path $releaseDir "stage\AkvariumOBS"
 $portableZip = Join-Path $releaseDir "AkvariumOBS-$version-Windows-x64-Portable.zip"

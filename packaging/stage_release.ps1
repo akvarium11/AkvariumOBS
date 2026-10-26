@@ -27,13 +27,22 @@ Get-ChildItem -Path $binDir -Filter "akvarium-*-test.exe" -ErrorAction SilentlyC
 Get-ChildItem -Path $binDir -Filter "akvarium-*-selftest.exe" -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem -Path $binDir -Filter "phrase-match-test.exe" -ErrorAction SilentlyContinue | Remove-Item -Force
 
-Write-Host "Copying whisper speech model..."
+Write-Host "Copying voice recognition models and runtime..."
 New-Item -ItemType Directory -Force -Path $dataVoiceDir | Out-Null
-$modelSrc = "$env:APPDATA\AkvariumOBS\voice\ggml-base-q8_0.bin"
-if (-not (Test-Path $modelSrc)) {
-    $modelSrc = Join-Path $repoRoot "build_x64\rundir\RelWithDebInfo\config\AkvariumOBS\voice\ggml-base-q8_0.bin"
+$models = @("vosk-model-small-ru-0.22", "vosk-model-small-en-us-0.15")
+foreach ($m in $models) {
+    $src = Join-Path $repoRoot "data\voice\$m"
+    if (Test-Path $src) {
+        Copy-Item -Recurse -Force $src (Join-Path $dataVoiceDir $m)
+    }
 }
-Copy-Item -Force $modelSrc (Join-Path $dataVoiceDir "ggml-base-q8_0.bin")
+$voskDlls = @("libvosk.dll", "libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll")
+foreach ($dll in $voskDlls) {
+    $src = Join-Path $repoRoot "deps\vosk\bin\$dll"
+    if (Test-Path $src) {
+        Copy-Item -Force $src (Join-Path $binDir $dll)
+    }
+}
 
 Write-Host "Copying CRT and OpenMP runtime DLLs..."
 $crtDir = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC\14.44.35112\x64\Microsoft.VC143.CRT"

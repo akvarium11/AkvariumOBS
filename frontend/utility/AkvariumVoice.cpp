@@ -1,5 +1,5 @@
 /******************************************************************************
-    AkvariumOBS: voice commands implementation (whisper.cpp + WASAPI).
+    AkvariumOBS: voice commands implementation (Vosk + WASAPI).
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -11,6 +11,7 @@
 
 #include "AkvariumPhraseMatch.hpp"
 #include "AkvariumVoiceFilter.hpp"
+#include "AkvariumVosk.hpp"
 
 #include <OBSApp.hpp>
 
@@ -20,12 +21,13 @@
 
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaObject>
 #include <QStringList>
 #include <QThread>
-
-#include <curl/curl.h>
-#include <whisper.h>
 
 #include <windows.h>
 #include <audioclient.h>
@@ -81,38 +83,6 @@ static void AppendResampled16k(const float *data, size_t frames, int channels, i
 	phase = (double)outCount / ratio - (double)mono.size() + phase;
 	if (!mono.empty())
 		lastSample = mono.back();
-}
-
-static DecodeConfidence MeasureDecode(whisper_context *ctx)
-{
-	DecodeConfidence confidence;
-	double sum = 0.0;
-	double minProb = 1.0;
-	int count = 0;
-	double noSpeech = 0.0;
-
-	const int segments = whisper_full_n_segments(ctx);
-	for (int i = 0; i < segments; i++) {
-		noSpeech = std::max(noSpeech, (double)whisper_full_get_segment_no_speech_prob(ctx, i));
-
-		const int tokens = whisper_full_n_tokens(ctx, i);
-		for (int t = 0; t < tokens; t++) {
-			const char *text = whisper_full_get_token_text(ctx, i, t);
-			if (!text || !*text || (text[0] == '<' && text[1] == '|'))
-				continue;
-
-			const double p = (double)whisper_full_get_token_p(ctx, i, t);
-			sum += p;
-			count++;
-			minProb = std::min(minProb, p);
-		}
-	}
-
-	confidence.tokens = count;
-	confidence.meanTokenProb = count > 0 ? sum / (double)count : 0.0;
-	confidence.minTokenProb = count > 0 ? minProb : 0.0;
-	confidence.noSpeechProb = noSpeech;
-	return confidence;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -243,26 +213,55 @@ void VoiceEngine::SaveConfig(const VoiceConfig &cfg)
 
 QString VoiceEngine::ModelPath(const QString &model)
 {
-	const QString fileName = QStringLiteral("ggml-%1.bin").arg(model);
+	QString name = model.trimmed();
+	if (name.isEmpty() || name == QStringLiteral("auto"))
+		name = AutoModel();
+
+	QStringList candidates;
+	if (name == QStringLiteral("ru") || name.startsWith(QStringLiteral("vosk-model-small-ru"))) {
+		candidates << QStringLiteral("vosk-model-small-ru-0.22")
+		           << QStringLiteral("ru");
+	} else if (name == QStringLiteral("en") || name.startsWith(QStringLiteral("vosk-model-small-en"))) {
+		candidates << QStringLiteral("vosk-model-small-en-us-0.15")
+		           << QStringLiteral("en");
+	} else {
+		candidates << name;
+	}
 
 	char path[512];
-	const QString relative = QStringLiteral("AkvariumOBS/voice/%1").arg(fileName);
-	if (GetAppConfigPath(path, sizeof(path), relative.toUtf8().constData()) > 0) {
-		const QString userPath = QString::fromUtf8(path);
-		if (os_file_exists(userPath.toUtf8().constData()))
-			return userPath;
+	for (const QString &c : candidates) {
+		const QString relative = QStringLiteral("AkvariumOBS/voice/%1").arg(c);
+		if (GetAppConfigPath(path, sizeof(path), relative.toUtf8().constData()) > 0) {
+			const QString userPath = QString::fromUtf8(path);
+			if (os_file_exists(userPath.toUtf8().constData()))
+				return userPath;
+		}
 	}
 
 	const QString appDir = QCoreApplication::applicationDirPath();
-	for (const QString &candidate :
-	     {appDir + QStringLiteral("/../../data/voice/") + fileName,
-	      appDir + QStringLiteral("/../../../data/voice/") + fileName,
-	      appDir + QStringLiteral("/data/voice/") + fileName}) {
-		if (os_file_exists(candidate.toUtf8().constData()))
-			return candidate;
+	const QStringList baseDirs = {
+		appDir + QStringLiteral("/../../data/voice"),
+		appDir + QStringLiteral("/../../../data/voice"),
+		appDir + QStringLiteral("/data/voice"),
+		appDir + QStringLiteral("/voice"),
+		QDir::currentPath() + QStringLiteral("/data/voice")
+	};
+
+	for (const QString &base : baseDirs) {
+		for (const QString &c : candidates) {
+			const QString candidatePath = base + QStringLiteral("/") + c;
+			if (os_file_exists(candidatePath.toUtf8().constData()))
+				return candidatePath;
+		}
 	}
 
-	if (GetAppConfigPath(path, sizeof(path), relative.toUtf8().constData()) > 0)
+	for (const QString &c : candidates) {
+		if (os_file_exists(c.toUtf8().constData()))
+			return c;
+	}
+
+	const QString defaultRel = QStringLiteral("AkvariumOBS/voice/%1").arg(candidates.first());
+	if (GetAppConfigPath(path, sizeof(path), defaultRel.toUtf8().constData()) > 0)
 		return QString::fromUtf8(path);
 
 	return QString();
@@ -270,25 +269,31 @@ QString VoiceEngine::ModelPath(const QString &model)
 
 QString VoiceEngine::ModelUrl(const QString &model)
 {
-	return QStringLiteral("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-%1.bin").arg(model);
+	Q_UNUSED(model);
+	return QString();
 }
 
 bool VoiceEngine::ModelReady(const QString &model)
 {
 	const QString path = ModelPath(model);
-	return !path.isEmpty() && os_file_exists(path.toUtf8().constData());
+	if (path.isEmpty() || !os_file_exists(path.toUtf8().constData()))
+		return false;
+
+	const QString confPath = path + QStringLiteral("/conf/model.conf");
+	const QString amPath = path + QStringLiteral("/am/final.mdl");
+	return os_file_exists(confPath.toUtf8().constData()) || os_file_exists(amPath.toUtf8().constData());
 }
 
 QString VoiceEngine::AutoModel()
 {
-	/* base-q8_0 is ~82 MB, fast and accurate for command words */
-	if (ModelReady(QStringLiteral("base-q8_0")))
-		return QStringLiteral("base-q8_0");
-	if (ModelReady(QStringLiteral("base")))
-		return QStringLiteral("base");
-	if (ModelReady(QStringLiteral("tiny")))
-		return QStringLiteral("tiny");
-	return QStringLiteral("base-q8_0");
+	VoiceConfig cfg = Instance() ? Instance()->m_config : LoadConfig();
+	const QString lang = cfg.language.trimmed().toLower();
+	if (lang.startsWith(QStringLiteral("ru")))
+		return QStringLiteral("vosk-model-small-ru-0.22");
+	if (lang.startsWith(QStringLiteral("en")))
+		return QStringLiteral("vosk-model-small-en-us-0.15");
+	return AutoLanguage(cfg.phrases).startsWith(QStringLiteral("ru")) ? QStringLiteral("vosk-model-small-ru-0.22")
+	                                                                  : QStringLiteral("vosk-model-small-en-us-0.15");
 }
 
 QString VoiceEngine::BuildPrompt() const
@@ -415,52 +420,26 @@ QString VoiceEngine::TestRecognize(const QString &wavPath, const QStringList &ph
 	if (!ReadWavMono16k(wavPath, audio))
 		return QString();
 
+	auto &api = VoskApi::Instance();
+	if (!api.Load())
+		return QString();
+
 	const QString model = AutoModel();
 	const QString path = ModelPath(model);
-	whisper_context_params contextParams = whisper_context_default_params();
-	contextParams.use_gpu = false;
-	whisper_context *ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), contextParams);
+	VoskModel *ctx = api.model_new(path.toUtf8().constData());
 	if (!ctx)
 		return QString();
 
-	PrepareForWhisper(audio);
+	PrepareAudio(audio);
 
-	whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-	params.n_threads = 4;
-	params.translate = false;
-	params.no_context = true;
-	params.single_segment = true;
-	params.print_special = false;
-	params.print_progress = false;
-	params.print_realtime = false;
-	params.print_timestamps = false;
-	params.suppress_blank = true;
-	params.suppress_nst = true;
-	params.temperature = 0.0f;
-	params.max_tokens = 32;
-	params.audio_ctx = 0;
-	params.initial_prompt = nullptr;
-	const QByteArray lang = AutoLanguage(phrases).toUtf8();
-	params.language = lang.constData();
-
-	QString text;
 	DecodeConfidence confidence;
-	if (whisper_full(ctx, params, audio.data(), (int)audio.size()) == 0) {
-		const int segments = whisper_full_n_segments(ctx);
-		for (int i = 0; i < segments; i++) {
-			const char *segmentText = whisper_full_get_segment_text(ctx, i);
-			if (segmentText)
-				text += QString::fromUtf8(segmentText).trimmed() + QChar(' ');
-		}
-		confidence = MeasureDecode(ctx);
-	}
-	whisper_free(ctx);
+	const QString text = Instance() ? Instance()->DecodeWith(ctx, audio, &confidence) : QString();
+	api.model_free(ctx);
 
-	text = text.trimmed();
 	if (transcriptOut)
 		*transcriptOut = text;
 
-	if (IsLikelyHallucination(text) || confidence.noSpeechProb > 0.45)
+	if (text.isEmpty() || confidence.noSpeechProb > 0.45)
 		return QString();
 
 	for (const QString &phrase : phrases) {
@@ -489,7 +468,7 @@ VoiceEngine::VoiceEngine(OBSBasic *main) : m_main(main)
 			SetStatus(QStringLiteral("Model ready"));
 			ReapplyConfig();
 		} else {
-			SetStatus(QStringLiteral("Model download failed: %1").arg(error));
+			SetStatus(QStringLiteral("Model verification failed: %1").arg(error));
 		}
 	});
 }
@@ -499,20 +478,12 @@ VoiceEngine::~VoiceEngine()
 	Stop();
 }
 
-static void whisper_log_cb(enum ggml_log_level level, const char *text, void *)
-{
-	if (!text)
-		return;
-	const int obsLevel = (level == GGML_LOG_LEVEL_ERROR) ? LOG_ERROR : LOG_DEBUG;
-	blog(obsLevel, "[whisper] %s", text);
-}
-
 void VoiceEngine::Init(OBSBasic *main)
 {
 	if (engineInstance)
 		return;
 
-	whisper_log_set(whisper_log_cb, nullptr);
+	VoskApi::Instance().Load();
 
 	engineInstance = new VoiceEngine(main);
 	engineInstance->m_config = LoadConfig();
@@ -640,9 +611,9 @@ void VoiceEngine::Stop()
 
 void VoiceEngine::ReleaseContexts()
 {
-	if (m_ctx) {
-		whisper_free(m_ctx);
-		m_ctx = nullptr;
+	if (m_model) {
+		VoskApi::Instance().model_free(m_model);
+		m_model = nullptr;
 		m_modelLoaded.clear();
 	}
 }
@@ -677,23 +648,23 @@ double VoiceEngine::SpeechStartThreshold() const
 	/* Sensitivity 1 (low) .. 5 (high) */
 	switch (m_config.sensitivity) {
 	case 1: /* Low (loud room / close voice: rejects background speech & bleed) */
-		return std::max(0.040, m_noiseFloor * 4.5);
+		return std::max(0.020, m_noiseFloor * 4.0);
 	case 2: /* Medium-Low */
-		return std::max(0.024, m_noiseFloor * 3.5);
+		return std::max(0.012, m_noiseFloor * 3.0);
 	case 4: /* Medium-High */
-		return std::max(0.009, m_noiseFloor * 2.0);
+		return std::max(0.005, m_noiseFloor * 1.8);
 	case 5: /* High (quiet voice) */
-		return std::max(0.004, m_noiseFloor * 1.5);
+		return std::max(0.002, m_noiseFloor * 1.3);
 	case 3: /* Normal (recommended) */
 	default:
-		return std::max(0.016, m_noiseFloor * 2.8);
+		return std::max(0.007, m_noiseFloor * 2.2);
 	}
 }
 
 double VoiceEngine::SpeechEndThreshold() const
 {
 	const double start = SpeechStartThreshold();
-	return std::max(0.0025, start * 0.50);
+	return std::max(0.0015, start * 0.45);
 }
 
 QString VoiceEngine::ResolveLanguage() const
@@ -724,7 +695,7 @@ QString VoiceEngine::ResolveDeviceSpec() const
 	if (!sourceName.isEmpty()) {
 		source = obs_get_source_by_name(sourceName.toUtf8().constData());
 		if (!source) {
-			for (int channel = 1; channel < 7 && !source; channel++) {
+			for (int channel = 1; channel <= 6 && !source; channel++) {
 				obs_source_t *candidate = obs_get_output_source(channel);
 				if (!candidate)
 					continue;
@@ -735,29 +706,42 @@ QString VoiceEngine::ResolveDeviceSpec() const
 			}
 		}
 	} else {
-		obs_source_t *sceneSource = obs_frontend_get_current_scene();
-		obs_scene_t *scene = obs_scene_from_source(sceneSource);
-		if (scene) {
-			obs_scene_enum_items(
-				scene,
-				[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
-					obs_source_t **out = static_cast<obs_source_t **>(param);
-					obs_source_t *src = obs_sceneitem_get_source(item);
-					if (!src || !obs_source_active(src))
-						return true;
-					if ((obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) == 0)
-						return true;
-					const char *id = obs_source_get_id(src);
-					if (id && strstr(id, "input_capture")) {
-						*out = obs_source_get_ref(src);
-						return false;
-					}
-					return true;
-				},
-				&source);
+		/* Priority 1: OBS global input sources (Mic/Aux 1..4: channels 3 to 6) */
+		for (int channel = 3; channel <= 6 && !source; channel++) {
+			obs_source_t *candidate = obs_get_output_source(channel);
+			if (!candidate)
+				continue;
+			if (obs_source_active(candidate))
+				source = obs_source_get_ref(candidate);
+			obs_source_release(candidate);
 		}
-		if (sceneSource)
-			obs_source_release(sceneSource);
+
+		/* Priority 2: Active scene audio input capture */
+		if (!source) {
+			obs_source_t *sceneSource = obs_frontend_get_current_scene();
+			obs_scene_t *scene = obs_scene_from_source(sceneSource);
+			if (scene) {
+				obs_scene_enum_items(
+					scene,
+					[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
+						obs_source_t **out = static_cast<obs_source_t **>(param);
+						obs_source_t *src = obs_sceneitem_get_source(item);
+						if (!src || !obs_source_active(src))
+							return true;
+						if ((obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) == 0)
+							return true;
+						const char *id = obs_source_get_id(src);
+						if (id && strstr(id, "input_capture")) {
+							*out = obs_source_get_ref(src);
+							return false;
+						}
+						return true;
+					},
+					&source);
+			}
+			if (sceneSource)
+				obs_source_release(sceneSource);
+		}
 	}
 
 	QString spec;
@@ -809,8 +793,23 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 
 	enumerator->Release();
 
+	WCHAR devFriendlyName[256] = L"Audio Device";
+	IPropertyStore *props = nullptr;
+	if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props)) && props) {
+		PROPVARIANT val;
+		PropVariantInit(&val);
+		if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &val)) && val.vt == VT_LPWSTR) {
+			wcsncpy_s(devFriendlyName, val.pwszVal, 255);
+		}
+		PropVariantClear(&val);
+		props->Release();
+	}
+	blog(LOG_INFO, "[AkvariumVoice] Opening audio device: '%ls' (spec: '%s')",
+	     devFriendlyName, deviceSpec.toUtf8().constData());
+
 	IAudioClient *client = nullptr;
 	if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void **)&client))) {
+		blog(LOG_ERROR, "[AkvariumVoice] Failed to activate IAudioClient on '%ls'", devFriendlyName);
 		device->Release();
 		return false;
 	}
@@ -838,7 +837,17 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 			device->Release();
 			return false;
 		}
-		if (mixFormat->wBitsPerSample != 32 || mixFormat->wFormatTag != WAVE_FORMAT_IEEE_FLOAT) {
+
+		bool isFloat = (mixFormat->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
+		if (mixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixFormat->cbSize >= 22) {
+			const auto *ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE *>(mixFormat);
+			if (ext->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)
+				isFloat = true;
+		}
+
+		if (mixFormat->wBitsPerSample != 32 || !isFloat) {
+			blog(LOG_WARNING, "[AkvariumVoice] Device mix format tag=0x%04X, bits=%d not 32-bit float",
+			     mixFormat->wFormatTag, mixFormat->wBitsPerSample);
 			CoTaskMemFree(mixFormat);
 			client->Release();
 			device->Release();
@@ -851,6 +860,7 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 	}
 
 	if (FAILED(hr)) {
+		blog(LOG_ERROR, "[AkvariumVoice] client->Initialize failed: 0x%08X", hr);
 		client->Release();
 		device->Release();
 		return false;
@@ -858,12 +868,14 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 
 	IAudioCaptureClient *capture = nullptr;
 	if (FAILED(client->GetService(__uuidof(IAudioCaptureClient), (void **)&capture))) {
+		blog(LOG_ERROR, "[AkvariumVoice] Failed to get IAudioCaptureClient");
 		client->Release();
 		device->Release();
 		return false;
 	}
 
 	if (FAILED(client->Start())) {
+		blog(LOG_ERROR, "[AkvariumVoice] Failed to start audio client");
 		capture->Release();
 		client->Release();
 		device->Release();
@@ -879,6 +891,7 @@ bool VoiceEngine::OpenCapture(const QString &deviceSpec, void **outDevice, void 
 	m_channels = channels;
 	m_phase = 0.0;
 	m_lastSample = 0.0f;
+	blog(LOG_INFO, "[AkvariumVoice] Audio capture active: %d Hz, %d channels", sampleRate, channels);
 	return true;
 }
 
@@ -892,10 +905,14 @@ void VoiceEngine::CaptureLoop()
 	IAudioCaptureClient *capture = nullptr;
 	int sampleRate = 0;
 
-	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED)))
+	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+		blog(LOG_ERROR, "[AkvariumVoice] CoInitializeEx failed in CaptureLoop");
 		return;
+	}
 
 	if (!OpenCapture(spec, (void **)&device, (void **)&client, (void **)&capture, &sampleRate)) {
+		blog(LOG_ERROR, "[AkvariumVoice] OpenCapture failed for spec: '%s'",
+		     spec.toUtf8().constData());
 		CoUninitialize();
 		return;
 	}
@@ -968,6 +985,8 @@ void VoiceEngine::Feed(const float *data, size_t frames, int channels)
 				m_inSpeech = true;
 				m_silenceMs = 0;
 				m_segment = m_history;
+				blog(LOG_INFO, "[AkvariumVoice] Voice gate triggered (RMS %.4f > start %.4f)",
+				     rms, startThold);
 			} else {
 				/* Adapt background noise floor smoothly */
 				m_noiseFloor = 0.98 * m_noiseFloor + 0.02 * std::min(rms, 0.02);
@@ -998,7 +1017,12 @@ void VoiceEngine::Feed(const float *data, size_t frames, int channels)
 void VoiceEngine::FinalizeSegment(std::vector<float> &segment)
 {
 	const AudioSegmentStats stats = AnalyzeAudioSegment(segment.data(), segment.size(), SpeechEndThreshold());
-	if (SegmentLooksLikeSpeech(stats, m_config.sensitivity)) {
+	const bool pass = SegmentLooksLikeSpeech(stats, m_config.sensitivity);
+	blog(LOG_INFO, "[AkvariumVoice] Voice segment: frames=%d (%.1fs), rms=%.4f, peak=%.4f, activeMs=%.0f -> %s",
+	     stats.frames, (stats.frames * 20.0) / 1000.0, stats.rms, stats.peak, stats.activeMs,
+	     pass ? "ACCEPTED" : "DROPPED");
+
+	if (pass) {
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (m_pendingQueue.size() >= 3)
 			m_pendingQueue.erase(m_pendingQueue.begin());
@@ -1011,70 +1035,83 @@ void VoiceEngine::FinalizeSegment(std::vector<float> &segment)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Whisper inference                                                         */
+/* Vosk inference                                                            */
 /* ------------------------------------------------------------------------- */
 
-QString VoiceEngine::DecodeWith(whisper_context *ctx, const std::vector<float> &audio,
+QString VoiceEngine::DecodeWith(VoskModel *model, const std::vector<float> &audio,
 				DecodeConfidence *confidence)
 {
-	if (!ctx || audio.empty())
+	auto &api = VoskApi::Instance();
+	if (!api.IsLoaded() || !model || audio.empty())
 		return QString();
 
-	whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-	params.n_threads = std::max(2, std::min(6, QThread::idealThreadCount() / 2));
-	params.translate = false;
-	params.no_context = true;
-	params.single_segment = true;
-	params.print_special = false;
-	params.print_progress = false;
-	params.print_realtime = false;
-	params.print_timestamps = false;
-	params.suppress_blank = true;
-	params.suppress_nst = true;
-	params.temperature = 0.0f;
-	params.max_tokens = 32;
-	params.no_timestamps = true;
-	params.no_speech_thold = 0.40f;
-	params.logprob_thold = -1.0f;
-	params.entropy_thold = 2.4f;
-	params.audio_ctx = 0;         /* Default full context (1500) preserves maximum accuracy */
-
-	/* Do NOT use initial_prompt in live recognition - causes phantom hallucinations on silence */
-	params.initial_prompt = nullptr;
-
-	const QByteArray lang = ResolveLanguage().toUtf8();
-	params.language = lang.constData();
-
-	if (whisper_full(ctx, params, audio.data(), (int)audio.size()) != 0)
+	VoskRecognizer *rec = api.recognizer_new(model, 16000.0f);
+	if (!rec)
 		return QString();
 
-	QString text;
-	const int segments = whisper_full_n_segments(ctx);
-	for (int i = 0; i < segments; i++) {
-		const char *segmentText = whisper_full_get_segment_text(ctx, i);
-		if (segmentText)
-			text += QString::fromUtf8(segmentText).trimmed() + QChar(' ');
+	api.recognizer_set_words(rec, 1);
+
+	const auto pcm = FloatToPcm16(audio);
+	const int chunkSize = 4000;
+	const char *byteData = reinterpret_cast<const char *>(pcm.data());
+	const int totalBytes = static_cast<int>(pcm.size() * sizeof(int16_t));
+
+	for (int offset = 0; offset < totalBytes; offset += chunkSize) {
+		const int bytes = std::min(chunkSize, totalBytes - offset);
+		api.recognizer_accept_waveform(rec, byteData + offset, bytes);
 	}
 
-	if (confidence)
-		*confidence = MeasureDecode(ctx);
+	const char *jsonStr = api.recognizer_final_result(rec);
+	QString text;
 
-	return text.trimmed();
+	if (jsonStr && *jsonStr) {
+		const QJsonDocument doc = QJsonDocument::fromJson(QByteArray(jsonStr));
+		const QJsonObject obj = doc.object();
+		text = obj.value(QStringLiteral("text")).toString().trimmed();
+
+		if (confidence) {
+			const QJsonArray words = obj.value(QStringLiteral("result")).toArray();
+			confidence->tokens = words.size();
+			double sumConf = 0.0;
+			double minConf = 1.0;
+			for (const auto &wVal : words) {
+				const double c = wVal.toObject().value(QStringLiteral("conf")).toDouble(1.0);
+				sumConf += c;
+				minConf = std::min(minConf, c);
+			}
+			confidence->meanTokenProb = words.isEmpty() ? 1.0 : sumConf / (double)words.size();
+			confidence->minTokenProb = words.isEmpty() ? 1.0 : minConf;
+			confidence->noSpeechProb = text.isEmpty() ? 1.0 : 0.0;
+		}
+	}
+
+	api.recognizer_free(rec);
+	return text;
 }
 
 void VoiceEngine::InferenceLoop()
 {
 	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 
-	const QString model = m_config.model;
-	const QString path = ModelPath(model);
-	if (path.isEmpty())
+	auto &api = VoskApi::Instance();
+	if (!api.Load()) {
+		blog(LOG_ERROR, "[AkvariumVoice] Failed to load speech recognition runtime (libvosk.dll)");
+		QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Failed to load engine library")); },
+					  Qt::QueuedConnection);
 		return;
+	}
 
-	whisper_context_params cparams = whisper_context_default_params();
-	cparams.use_gpu = false; /* CPU is fast (~100 ms) and free of Vulkan driver quirks */
-	m_ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), cparams);
-	if (!m_ctx) {
+	const QString model = m_config.model.isEmpty() ? AutoModel() : m_config.model;
+	const QString path = ModelPath(model);
+	if (path.isEmpty()) {
+		QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Model path not found")); },
+					  Qt::QueuedConnection);
+		return;
+	}
+
+	m_model = api.model_new(path.toUtf8().constData());
+	if (!m_model) {
+		blog(LOG_ERROR, "[AkvariumVoice] Failed to load model from %s", path.toUtf8().constData());
 		QMetaObject::invokeMethod(this, [this]() { SetStatus(QStringLiteral("Failed to load model")); },
 					  Qt::QueuedConnection);
 		return;
@@ -1098,17 +1135,15 @@ void VoiceEngine::InferenceLoop()
 			m_pendingQueue.erase(m_pendingQueue.begin());
 		}
 
-		PrepareForWhisper(audio);
+		PrepareAudio(audio);
 
 		DecodeConfidence confidence;
-		const QString text = DecodeWith(m_ctx, audio, &confidence);
+		const QString text = DecodeWith(m_model, audio, &confidence);
 
-		/* Drop silence, low-confidence decodes, and hallucinations */
-		if (text.isEmpty() ||
-		    confidence.noSpeechProb > 0.45 ||
-		    (confidence.tokens >= 2 && confidence.meanTokenProb < 0.55) ||
-		    (confidence.tokens >= 1 && confidence.minTokenProb < 0.15) ||
-		    IsLikelyHallucination(text)) {
+		blog(LOG_INFO, "[AkvariumVoice] Vosk decoded: '%s' (tokens=%d, conf=%.2f)",
+		     text.toUtf8().constData(), confidence.tokens, confidence.meanTokenProb);
+
+		if (text.isEmpty()) {
 			continue;
 		}
 
@@ -1359,24 +1394,30 @@ void VoiceEngine::RunInteractiveRecord(int seconds, bool isTest)
 	bool matched = false;
 
 	if (ok) {
-		PrepareForWhisper(recorded);
+		PrepareAudio(recorded);
 
-		const QString model = AutoModel();
-		const QString path = ModelPath(model);
-		whisper_context_params cparams = whisper_context_default_params();
-		cparams.use_gpu = false;
-		whisper_context *ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), cparams);
+		auto &api = VoskApi::Instance();
+		if (api.Load()) {
+			const QString model = AutoModel();
+			const QString path = ModelPath(model);
+			VoskModel *ctx = api.model_new(path.toUtf8().constData());
 
-		if (ctx) {
-			DecodeConfidence conf;
-			text = DecodeWith(ctx, recorded, &conf);
-			whisper_free(ctx);
+			if (ctx) {
+				DecodeConfidence conf;
+				text = DecodeWith(ctx, recorded, &conf);
+				api.model_free(ctx);
 
-			text = NormalizePhraseText(text);
+				text = NormalizePhraseText(text);
+				blog(LOG_INFO, "[AkvariumVoice] Interactive decoded text: '%s'",
+				     text.toUtf8().constData());
 
-			if (isTest) {
-				matchedPhrase = MatchCommand(text, &score);
-				matched = !matchedPhrase.isEmpty();
+				if (!text.isEmpty())
+					SetTranscript(text);
+
+				if (isTest) {
+					matchedPhrase = MatchCommand(text, &score);
+					matched = !matchedPhrase.isEmpty();
+				}
 			}
 		}
 	}
@@ -1407,13 +1448,14 @@ void VoiceEngine::RunSampleCollection(const QString &phrase, int totalSamples)
 
 	QStringList learnedVariants;
 
+	auto &api = VoskApi::Instance();
+	api.Load();
+
 	const QString model = AutoModel();
 	const QString path = ModelPath(model);
-	whisper_context_params cparams = whisper_context_default_params();
-	cparams.use_gpu = false;
-	whisper_context *ctx = nullptr;
+	VoskModel *ctx = nullptr;
 	if (ModelReady(model)) {
-		ctx = whisper_init_from_file_with_params(path.toUtf8().constData(), cparams);
+		ctx = api.model_new(path.toUtf8().constData());
 	}
 
 	if (!ctx) {
@@ -1568,7 +1610,7 @@ void VoiceEngine::RunSampleCollection(const QString &phrase, int totalSamples)
 				QString heard;
 				DecodeConfidence conf;
 				if (!sampleAudio.empty() && inSpeech) {
-					PrepareForWhisper(sampleAudio);
+					PrepareAudio(sampleAudio);
 					heard = DecodeWith(ctx, sampleAudio, &conf);
 					heard = NormalizePhraseText(heard);
 				}
@@ -1627,7 +1669,7 @@ void VoiceEngine::RunSampleCollection(const QString &phrase, int totalSamples)
 		CoUninitialize();
 	}
 
-	whisper_free(ctx);
+	api.model_free(ctx);
 
 	if (!m_interactiveCancel && !phrase.isEmpty() && !learnedVariants.isEmpty()) {
 		VoiceConfig cfg = LoadConfig();
@@ -1677,7 +1719,7 @@ void VoiceEngine::RunSampleCollection(const QString &phrase, int totalSamples)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Model downloader                                                          */
+/* Model verification (local offline models)                                 */
 /* ------------------------------------------------------------------------- */
 
 VoiceModelDownloader::VoiceModelDownloader(QObject *parent) : QObject(parent) {}
@@ -1691,40 +1733,7 @@ VoiceModelDownloader::~VoiceModelDownloader()
 
 QString VoiceModelDownloader::TargetPath(const QString &model)
 {
-	const QString path = VoiceEngine::ModelPath(model);
-	if (path.isEmpty())
-		return QString();
-
-	const int slash = path.lastIndexOf(QChar('/'));
-	if (slash > 0)
-		os_mkdirs(path.left(slash).toUtf8().constData());
-
-	return path;
-}
-
-struct DownloadState {
-	FILE *file = nullptr;
-	VoiceModelDownloader *self = nullptr;
-};
-
-static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)
-{
-	auto *state = static_cast<DownloadState *>(userdata);
-	return fwrite(ptr, size, nmemb, state->file);
-}
-
-static int progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_off_t)
-{
-	auto *state = static_cast<DownloadState *>(clientp);
-	if (state->self && state->self->Cancelled())
-		return 1;
-
-	if (dltotal > 0 && state->self) {
-		const int percent = (int)((dlnow * 100) / dltotal);
-		QMetaObject::invokeMethod(state->self, [state, percent]() { emit state->self->Progress(percent); },
-					  Qt::QueuedConnection);
-	}
-	return 0;
+	return VoiceEngine::ModelPath(model);
 }
 
 void VoiceModelDownloader::Start(const QString &model)
@@ -1742,60 +1751,20 @@ void VoiceModelDownloader::Cancel()
 
 void VoiceModelDownloader::Run(const QString &model)
 {
-	const QString target = TargetPath(model);
-	const QString partial = target + QStringLiteral(".part");
+	Q_UNUSED(model);
+	const QString autoM = VoiceEngine::AutoModel();
+	const bool ready = VoiceEngine::ModelReady(autoM);
 
-	if (target.isEmpty()) {
-		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("No configuration path")); },
-					  Qt::QueuedConnection);
-		return;
+	if (ready) {
+		QMetaObject::invokeMethod(this, [this]() {
+			emit Progress(100);
+			emit Finished(true, QString());
+		}, Qt::QueuedConnection);
+	} else {
+		QMetaObject::invokeMethod(this, [this, autoM]() {
+			emit Finished(false, QStringLiteral("Model %1 not found in local data/voice/").arg(autoM));
+		}, Qt::QueuedConnection);
 	}
-
-	FILE *file = fopen(partial.toUtf8().constData(), "wb");
-	if (!file) {
-		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("Cannot create file")); },
-					  Qt::QueuedConnection);
-		return;
-	}
-
-	DownloadState state;
-	state.file = file;
-	state.self = this;
-
-	CURL *curl = curl_easy_init();
-	bool ok = false;
-	if (curl) {
-		curl_easy_setopt(curl, CURLOPT_URL, VoiceEngine::ModelUrl(model).toUtf8().constData());
-		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
-		curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_cb);
-		curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);
-		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-		curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
-		curl_easy_setopt(curl, CURLOPT_USERAGENT, "AkvariumOBS");
-
-		ok = (curl_easy_perform(curl) == CURLE_OK);
-		curl_easy_cleanup(curl);
-	}
-
-	fclose(file);
-
-	if (!ok || m_cancel) {
-		os_unlink(partial.toUtf8().constData());
-		const QString error = m_cancel ? QStringLiteral("Cancelled") : QStringLiteral("Download failed");
-		QMetaObject::invokeMethod(this, [this, error]() { emit Finished(false, error); }, Qt::QueuedConnection);
-		return;
-	}
-
-	if (os_safe_replace(target.toUtf8().constData(), partial.toUtf8().constData(), nullptr) != 0) {
-		os_unlink(partial.toUtf8().constData());
-		QMetaObject::invokeMethod(this, [this]() { emit Finished(false, QStringLiteral("Cannot save model")); },
-					  Qt::QueuedConnection);
-		return;
-	}
-
-	QMetaObject::invokeMethod(this, [this]() { emit Finished(true, QString()); }, Qt::QueuedConnection);
 }
 
 } // namespace akvarium

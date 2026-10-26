@@ -61,7 +61,7 @@ inline AudioSegmentStats AnalyzeAudioSegment(const float *data, size_t count, do
 
 /* Removes DC / sub-60Hz rumble and applies controlled automatic gain control
    ONLY to genuine speech, never amplifying quiet ambient background. */
-inline void PrepareForWhisper(std::vector<float> &pcm)
+inline void PrepareAudio(std::vector<float> &pcm)
 {
 	if (pcm.empty())
 		return;
@@ -81,13 +81,28 @@ inline void PrepareForWhisper(std::vector<float> &pcm)
 	for (float sample : pcm)
 		peak = std::max(peak, std::fabs(sample));
 
-	/* Only apply moderate boost if signal is genuine speech (peak >= 0.030).
-	   Never boost sub-threshold noise or background bleed. Max gain 2.5x (+8 dB). */
-	if (peak >= 0.030f && peak < 0.25f) {
-		const float gain = std::min(2.5f, 0.50f / peak);
+	/* Moderate boost: bring peak to ~0.50 if signal is speech (peak >= 0.008).
+	   Never boost sub-threshold noise or background bleed. Max gain 4.0x (+12 dB). */
+	if (peak >= 0.008f && peak < 0.35f) {
+		const float gain = std::min(4.0f, 0.50f / peak);
 		for (float &sample : pcm)
 			sample *= gain;
 	}
+}
+
+inline void PrepareForWhisper(std::vector<float> &pcm)
+{
+	PrepareAudio(pcm);
+}
+
+inline std::vector<int16_t> FloatToPcm16(const std::vector<float> &audio)
+{
+	std::vector<int16_t> out(audio.size());
+	for (size_t i = 0; i < audio.size(); i++) {
+		const float v = std::clamp(audio[i], -1.0f, 1.0f);
+		out[i] = static_cast<int16_t>(v * 32767.0f);
+	}
+	return out;
 }
 
 /* Rejects non-speech audio: pure silence, electrical clicks, breaths, keyboard clatter,
@@ -95,42 +110,41 @@ inline void PrepareForWhisper(std::vector<float> &pcm)
 inline bool SegmentLooksLikeSpeech(const AudioSegmentStats &stats, int sensitivity = 3)
 {
 	/* Speech command duration bounds:
-	   Minimum ~360 ms (18 frames at 20 ms), maximum 3.5 s (175 frames).
-	   A click, pop or breath is < 200 ms; long conversation is > 3.5 s. */
-	if (stats.frames < 18 || stats.frames > 175)
+	   Minimum ~200 ms (10 frames at 20 ms), maximum 4.0 s (200 frames). */
+	if (stats.frames < 10 || stats.frames > 200)
 		return false;
 
 	/* Active speech energy bounds based on sensitivity */
-	double minPeak = 0.030;
-	double minRms = 0.005;
-	double minActiveMs = 180.0;
+	double minPeak = 0.015;
+	double minRms = 0.0025;
+	double minActiveMs = 100.0;
 
 	switch (sensitivity) {
 	case 1: /* Low (loud room / reject background voice & bleed) */
-		minPeak = 0.050;
-		minRms = 0.010;
-		minActiveMs = 220.0;
+		minPeak = 0.035;
+		minRms = 0.006;
+		minActiveMs = 180.0;
 		break;
 	case 2: /* Medium-Low */
-		minPeak = 0.038;
-		minRms = 0.007;
-		minActiveMs = 200.0;
+		minPeak = 0.025;
+		minRms = 0.004;
+		minActiveMs = 140.0;
 		break;
 	case 4: /* Medium-High */
-		minPeak = 0.020;
-		minRms = 0.0035;
-		minActiveMs = 160.0;
+		minPeak = 0.010;
+		minRms = 0.0018;
+		minActiveMs = 80.0;
 		break;
 	case 5: /* High (quiet voice) */
-		minPeak = 0.012;
-		minRms = 0.0020;
-		minActiveMs = 140.0;
+		minPeak = 0.006;
+		minRms = 0.0010;
+		minActiveMs = 60.0;
 		break;
 	case 3: /* Normal / recommended */
 	default:
-		minPeak = 0.030;
-		minRms = 0.005;
-		minActiveMs = 180.0;
+		minPeak = 0.015;
+		minRms = 0.0025;
+		minActiveMs = 100.0;
 		break;
 	}
 
@@ -141,9 +155,9 @@ inline bool SegmentLooksLikeSpeech(const AudioSegmentStats &stats, int sensitivi
 	if (stats.activeMs < minActiveMs)
 		return false;
 
-	/* Active speech must make up at least 20% of the buffer (not a single spike in silence) */
+	/* Active speech must make up at least 15% of the buffer */
 	const double totalMs = (double)stats.frames * 20.0;
-	if (totalMs > 0.0 && (stats.activeMs / totalMs) < 0.20)
+	if (totalMs > 0.0 && (stats.activeMs / totalMs) < 0.15)
 		return false;
 
 	return true;

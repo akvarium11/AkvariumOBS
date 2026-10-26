@@ -123,7 +123,7 @@ VoiceCommandSettings::VoiceCommandSettings(QWidget *parent)
 	form->addRow(QString(), m_recordFeedback);
 
 	auto *modelRow = new QHBoxLayout();
-	m_downloadBtn = new QPushButton(QStringLiteral("Download / verify model"), this);
+	m_downloadBtn = new QPushButton(QStringLiteral("Verify local model"), this);
 	m_progress = new QProgressBar(this);
 	m_progress->setRange(0, 100);
 	m_progress->setValue(0);
@@ -263,7 +263,21 @@ void VoiceCommandSettings::RefreshMics()
 	m_mic->blockSignals(true);
 	m_mic->clear();
 
-	m_mic->addItem(QStringLiteral("Auto (Active Scene Microphone)"), QString());
+	m_mic->addItem(QStringLiteral("Auto (OBS Mic/Aux or System Default)"), QString());
+
+	for (int i = 1; i <= 6; i++) {
+		OBSSourceAutoRelease src = obs_get_output_source(i);
+		if (src) {
+			const char *name = obs_source_get_name(src);
+			if (name && *name) {
+				const uint32_t flags = obs_source_get_output_flags(src);
+				if (flags & OBS_SOURCE_AUDIO) {
+					m_mic->addItem(QStringLiteral("OBS: %1").arg(QString::fromUtf8(name)),
+						       QStringLiteral("source:%1").arg(QString::fromUtf8(name)));
+				}
+			}
+		}
+	}
 
 	if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
 		IMMDeviceEnumerator *enumerator = nullptr;
@@ -299,7 +313,7 @@ void VoiceCommandSettings::RefreshMics()
 						const QString devName = label.isEmpty() ? QString::fromWCharArray(id) : label;
 						m_mic->addItem(QStringLiteral("%1: %2")
 								       .arg((flow == eRender) ? QStringLiteral("Output")
-											      : QStringLiteral("Input"),
+											      : QStringLiteral("Microphone"),
 									    devName),
 							       prefix + QString::fromWCharArray(id));
 
@@ -487,8 +501,7 @@ void VoiceCommandSettings::UpdateStatus()
 
 	QString text;
 	if (!ready) {
-		text = QStringLiteral("Model ggml-%1.bin is not downloaded. Click 'Download / verify model'.")
-			       .arg(model);
+		text = QStringLiteral("Model %1 was not found in data/voice/.").arg(model);
 	} else if (auto *engine = VoiceEngine::Instance()) {
 		text = engine->StatusText();
 		if (text.isEmpty())
@@ -521,7 +534,7 @@ void VoiceCommandSettings::DownloadModel()
 	m_downloadBtn->setEnabled(false);
 	m_progress->setValue(0);
 	m_progress->setVisible(true);
-	m_recordFeedback->setText(QStringLiteral("Starting download of model %1...").arg(model));
+	m_recordFeedback->setText(QStringLiteral("Checking local model %1...").arg(model));
 	engine->DownloadMissingModels();
 }
 
@@ -556,7 +569,7 @@ void VoiceCommandSettings::StartTrainingPhrase()
 		return;
 
 	if (!VoiceEngine::ModelReady(VoiceEngine::AutoModel())) {
-		m_recordFeedback->setText(QStringLiteral("Download the recognition model first"));
+		m_recordFeedback->setText(QStringLiteral("Speech model not found in data/voice/"));
 		return;
 	}
 
@@ -600,7 +613,7 @@ void VoiceCommandSettings::StartTestingPhrase()
 		return;
 
 	if (!VoiceEngine::ModelReady(VoiceEngine::AutoModel())) {
-		m_recordFeedback->setText(QStringLiteral("Download the recognition model first"));
+		m_recordFeedback->setText(QStringLiteral("Speech model not found in data/voice/"));
 		return;
 	}
 

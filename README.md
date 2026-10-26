@@ -77,13 +77,13 @@ Dock panel **Scene Binding to Applications** (right sidebar):
 Official release packages:
 
 ```text
-AkvariumOBS-1.1b-Windows-x64-Installer.exe   Windows NSIS Installer (solid LZMA)
-AkvariumOBS-1.1b-Windows-x64-Portable.zip    Portable standalone archive
+AkvariumOBS-1.2-Windows-x64-Installer.exe   Windows NSIS Installer (solid LZMA)
+AkvariumOBS-1.2-Windows-x64-Portable.zip    Portable standalone archive
 ```
 
 - **Installer:** Installs to `Program Files\AkvariumOBS`, registers shortcuts, uninstaller in Windows Settings. Silent mode: `installer.exe /S /D=D:\path`.
 - **Portable:** Unpack anywhere, run `bin\64bit\AkvariumOBS.exe`. Add `--portable` to store settings locally in `.\config`.
-- Bundles the recognition model (`data\voice\ggml-base-q8_0.bin`), VC++ CRT, OpenMP, and Vulkan loader. Zero extra runtimes required.
+- Bundles the offline recognition models (`vosk-model-small-ru-0.22`, `vosk-model-small-en-us-0.15`), engine runtime, VC++ CRT, and OpenMP. Zero extra runtimes or internet downloads required.
 
 ---
 
@@ -186,13 +186,13 @@ AkvariumOBS — не плагин и не обёртка, а полноценн�
 Готовые релизные пакеты:
 
 ```text
-AkvariumOBS-1.1b-Windows-x64-Installer.exe   установщик (NSIS, LZMA)
-AkvariumOBS-1.1b-Windows-x64-Portable.zip    портативная сборка
+AkvariumOBS-1.2-Windows-x64-Installer.exe   установщик (NSIS, LZMA)
+AkvariumOBS-1.2-Windows-x64-Portable.zip    портативная сборка
 ```
 
 - **Установщик:** Ставит в выбранную папку, прописывает `HKLM\Software\AkvariumOBS`, добавляет пункт в «Удаление программ» и ярлыки. Тихая установка: `installer.exe /S /D=D:\path`.
 - **Portable:** Распакуйте в любую папку и запустите `bin\64bit\AkvariumOBS.exe`. Флаг `--portable` хранит настройки локально в `.\config`.
-- В сборку уже вложены модель речи `ggml-base-q8_0.bin`, VC++ runtime, OpenMP и Vulkan loader.
+- В сборку уже вложены офлайн-модели речи `vosk-model-small-ru-0.22`, `vosk-model-small-en-us-0.15`, runtime движка, VC++ runtime и OpenMP. Всё работает локально без интернета.
 
 ---
 

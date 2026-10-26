@@ -1,8 +1,8 @@
-AkvariumOBS 1.1b (Windows x64)
+AkvariumOBS 1.2 (Windows x64)
 ============================
 
 Fork of OBS Studio 32.2.2 (GPLv2) with:
-  - voice commands for the Replay Buffer (offline recognition, CPU or GPU);
+  - voice commands for the Replay Buffer (offline local speech recognition);
   - replay clip sounds (pick one audio file played on every replay save);
   - per-scene audio mixer state (mute/volume remembered per scene);
   - scene binding to applications (foreground / running / closed rules).
@@ -10,10 +10,9 @@ Fork of OBS Studio 32.2.2 (GPLv2) with:
 Requirements
 ------------
   - Windows 10 or 11, 64-bit
-  - x64 CPU with AVX2 for speech recognition (falls back gracefully)
-  - Vulkan-capable GPU is optional: recognition is faster on the GPU, otherwise CPU
-  - No Visual C++ redistributable or Vulkan runtime install is required: both are
-    bundled in bin\64bit
+  - x64 CPU for speech recognition (offline, lightweight)
+  - No external runtimes required: speech recognition runtime and models are bundled
+  - No Visual C++ redistributable install is required: bundled in bin\64bit
 
 Installed version
 -----------------
@@ -33,7 +32,7 @@ Settings -> Output -> Replay Buffer -> Voice Commands (Replay Buffer):
   2. click "Train new phrase (5 samples)" to enroll your trigger phrases;
   3. pick the microphone (Auto follows the active mic of the current scene);
   4. start the Replay Buffer and say the phrase.
-The recognition model (ggml-base-q8_0.bin) ships with the package in data\voice.
+The recognition models (vosk-model-small-ru-0.22, vosk-model-small-en-us-0.15) ship with the package in data\voice.
 
 Replay clip sound
 -----------------

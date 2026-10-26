@@ -79,7 +79,7 @@ inline int PhraseEditDistance(const QString &a, const QString &b)
 	return dp[n][m];
 }
 
-/* Splits clitic particles and pronouns that whisper.cpp frequently glues to verbs without spaces:
+/* Splits clitic particles and pronouns that speech recognizers frequently glue to verbs without spaces:
    "кликниэто" -> "кликни это", "откатиэто" -> "откати это", "clipthat" -> "clip that" */
 inline QString UnglueClitics(const QString &word)
 {
@@ -236,7 +236,7 @@ inline double PhraseWordSimilarity(const QString &heard, const QString &expected
 	if (heard == expected)
 		return 1.0;
 
-	/* English common whisper acoustic confusion */
+	/* English common acoustic confusion */
 	if ((heard == QStringLiteral("safe") && expected == QStringLiteral("save")) ||
 	    (heard == QStringLiteral("save") && expected == QStringLiteral("safe")))
 		return 0.90;
@@ -308,7 +308,7 @@ inline bool IsCommandFillerWord(const QString &word)
 	return fillers.contains(word);
 }
 
-/* Generates common whisper acoustic and morphological confusion aliases for commands:
+/* Generates common acoustic and morphological confusion aliases for commands:
    "клипни это" -> "кликни это", "заклипай это", "клипниэто", "кликниэто", etc. */
 inline QStringList GenerateAcousticVariants(const QString &phrase)
 {
@@ -473,7 +473,7 @@ inline bool PhraseMatches(const QString &phrase, const QString &transcript)
 	return MatchPhrase(phrase, transcript).matched;
 }
 
-/* Subtitle and video caption artifacts that whisper.cpp emits on non-speech audio. */
+/* Subtitle and video caption artifacts that speech models emit on non-speech audio. */
 inline const QStringList &HallucinationMarkers()
 {
 	static const QStringList markers = {

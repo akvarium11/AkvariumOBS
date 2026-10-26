@@ -12,42 +12,8 @@ endif()
 find_package(FFmpeg REQUIRED COMPONENTS avcodec avutil avformat)
 find_package(CURL REQUIRED)
 
-# AkvariumOBS: local speech recognition for replay buffer voice commands
-set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
-set(WHISPER_CURL OFF CACHE BOOL "" FORCE)
-set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-
-# GPU offload for recognition when the Vulkan SDK is available (AMD/Intel/NVIDIA).
-if(DEFINED ENV{VULKAN_SDK})
-  set(GGML_VULKAN ON CACHE BOOL "" FORCE)
-  # obs-deps also ships old Vulkan headers; prefer the installed SDK so the
-  # ggml-vulkan sources (PipelineRobustness, cooperative matrix) compile.
-  list(PREPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}")
-  set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include" CACHE PATH "" FORCE)
-  set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/Lib/vulkan-1.lib" CACHE FILEPATH "" FORCE)
-  set(Vulkan_GLSLC_EXECUTABLE "$ENV{VULKAN_SDK}/Bin/glslc.exe" CACHE FILEPATH "" FORCE)
-  # obs-deps ships an old vulkan_core.h; put the SDK headers in front of it.
-  include_directories(BEFORE "$ENV{VULKAN_SDK}/Include")
-  message(STATUS "AkvariumOBS: Vulkan backend enabled for whisper (VULKAN_SDK=$ENV{VULKAN_SDK})")
-else()
-  set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
-  message(STATUS "AkvariumOBS: Vulkan SDK not found, whisper will run on CPU")
-endif()
-if(NOT TARGET whisper)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/deps/whisper.cpp" whisper_cpp EXCLUDE_FROM_ALL)
-endif()
-
-# whisper.cpp is third-party C code; OBS builds with /WX, so relax warnings there.
-if(MSVC)
-  foreach(_whisper_target IN ITEMS whisper ggml ggml-base ggml-cpu ggml-blas ggml-vulkan)
-    if(TARGET ${_whisper_target})
-      target_compile_options(${_whisper_target} PRIVATE /WX- /W0)
-    endif()
-  endforeach()
-endif()
+# AkvariumOBS: local speech recognition for replay buffer voice commands (Vosk engine)
+include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/deps/vosk/include")
 
 if(NOT TARGET OBS::json11)
   add_subdirectory("${CMAKE_SOURCE_DIR}/deps/json11" json11)
@@ -75,7 +41,6 @@ target_link_libraries(
     OBS::frontend-api
     OBS::json11
     OBS::bpm
-    whisper
 )
 
 # AkvariumOBS: MCI playback for the replay buffer clip sound.
@@ -157,12 +122,25 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Qt Files" FILES ${target
 
 set_target_properties_obs(obs-studio PROPERTIES FOLDER frontend OUTPUT_NAME "$<IF:$<PLATFORM_ID:Windows>,AkvariumOBS,akvariumobs>")
 
+if(OS_WINDOWS)
+  add_custom_command(
+    TARGET obs-studio POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+            "${CMAKE_SOURCE_DIR}/deps/vosk/bin"
+            "$<TARGET_FILE_DIR:obs-studio>"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+            "${CMAKE_SOURCE_DIR}/data/voice"
+            "${CMAKE_BINARY_DIR}/rundir/$<CONFIG>/data/voice"
+    COMMENT "Copying voice recognition engine DLLs and models"
+  )
+endif()
+
 # AkvariumOBS: offline recognition self-test tool (not part of the default build).
-if(TARGET whisper AND TARGET Qt::Core)
+if(TARGET Qt::Core)
   add_executable(akvarium-voice-selftest EXCLUDE_FROM_ALL "${CMAKE_SOURCE_DIR}/tools/akvarium-voice-selftest.cpp")
-  target_include_directories(akvarium-voice-selftest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_include_directories(akvarium-voice-selftest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/deps/vosk/include")
   target_compile_options(akvarium-voice-selftest PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
-  target_link_libraries(akvarium-voice-selftest PRIVATE whisper Qt::Core)
+  target_link_libraries(akvarium-voice-selftest PRIVATE Qt::Core)
   set_target_properties_obs(akvarium-voice-selftest PROPERTIES FOLDER tools)
 endif()
 

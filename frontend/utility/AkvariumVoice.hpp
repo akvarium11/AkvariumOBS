@@ -27,7 +27,7 @@
 
 class OBSBasic;
 
-struct whisper_context;
+typedef struct VoskModel VoskModel;
 
 namespace akvarium {
 
@@ -130,7 +130,7 @@ private:
 	double SpeechEndThreshold() const;
 	QString ResolveLanguage() const;
 	QString BuildPrompt() const;
-	QString DecodeWith(whisper_context *ctx, const std::vector<float> &audio, DecodeConfidence *confidence);
+	QString DecodeWith(VoskModel *model, const std::vector<float> &audio, DecodeConfidence *confidence);
 	QString MatchCommand(const QString &text, double *scoreOut) const;
 	void ReleaseContexts();
 	QString ResolveDeviceSpec() const;
@@ -149,7 +149,7 @@ private:
 	std::condition_variable m_cv;
 	std::vector<std::vector<float>> m_pendingQueue;
 
-	whisper_context *m_ctx = nullptr;
+	VoskModel *m_model = nullptr;
 	QString m_modelLoaded;
 
 	VoiceModelDownloader *m_downloader = nullptr;

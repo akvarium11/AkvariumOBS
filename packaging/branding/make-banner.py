@@ -231,12 +231,12 @@ def build(title: str, subtitle: str, tags: list[str], out: str, scale: int = S, 
 EN = dict(
     title="AkvariumOBS",
     subtitle="OBS Studio fork — voice replay, per-scene audio, app-bound scenes",
-    tags=["Voice Replay", "Scene Mixer", "App Scenes", "Whisper GPU"],
+    tags=["Voice Replay", "Scene Mixer", "App Scenes", "Voice STT"],
 )
 RU = dict(
     title="AkvariumOBS",
     subtitle="Форк OBS Studio — голосовые повторы, миксер по сценам, сцены под приложение",
-    tags=["Голос", "Миксер", "Сцены", "Whisper GPU"],
+    tags=["Голос", "Миксер", "Сцены", "Voice STT"],
 )
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 /******************************************************************************
-    AkvariumOBS: offline voice-command self-test.
+    AkvariumOBS: offline voice-command self-test (Vosk engine).
 
     Usage:
-      akvarium-voice-selftest <model.bin> <audio.wav> "phrase one|phrase two"
+      akvarium-voice-selftest <model_dir> <audio.wav> "phrase one|phrase two"
 
     Prints the recognised transcript (UTF-8) and the matched phrase, or "NO MATCH".
     Used to verify the recognition pipeline without a microphone.
@@ -15,9 +15,12 @@
 
 #include "utility/AkvariumPhraseMatch.hpp"
 #include "utility/AkvariumVoiceFilter.hpp"
+#include "utility/AkvariumVosk.hpp"
 
-#include <whisper.h>
-
+#include <QCoreApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QString>
 #include <QStringList>
 
@@ -108,8 +111,10 @@ static bool ReadWav(const char *path, std::vector<float> &out)
 
 int main(int argc, char *argv[])
 {
+	QCoreApplication app(argc, argv);
+
 	if (argc < 4) {
-		printf("usage: %s <model.bin> <audio.wav> \"phrase one|phrase two\" [language]\n", argv[0]);
+		printf("usage: %s <model_dir> <audio.wav> \"phrase one|phrase two\"\n", argv[0]);
 		return 2;
 	}
 
@@ -119,7 +124,6 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	/* Same gates the engine applies before the model runs. */
 	const double noiseFloor = akvarium::EstimateNoiseFloor(audio);
 	const double gate = std::max(0.0045, noiseFloor * 4.0);
 	const akvarium::AudioSegmentStats stats =
@@ -128,86 +132,69 @@ int main(int argc, char *argv[])
 	       (double)audio.size() / 16000.0, stats.peak, stats.rms, stats.activeMs, noiseFloor,
 	       akvarium::SegmentLooksLikeSpeech(stats) ? "speech-like" : "REJECTED AS NOISE");
 
-	akvarium::PrepareForWhisper(audio);
+	akvarium::PrepareAudio(audio);
 
-	whisper_context_params cparams = whisper_context_default_params();
-	cparams.use_gpu = argc > 6 && atoi(argv[6]) != 0;
-	printf("USE_GPU: %d\n", (int)cparams.use_gpu);
-	whisper_context *ctx = whisper_init_from_file_with_params(argv[1], cparams);
-	if (!ctx) {
-		printf("FAIL: cannot load model\n");
+	auto &api = akvarium::VoskApi::Instance();
+	if (!api.Load()) {
+		printf("FAIL: cannot load libvosk.dll\n");
 		return 1;
 	}
 
-	const QByteArray language = argc > 4 ? QByteArray(argv[4]) : QByteArray("ru");
-
-	whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-	params.n_threads = 4;
-	params.translate = false;
-	params.no_context = true;
-	params.single_segment = true;
-	params.print_special = false;
-	params.print_progress = false;
-	params.print_realtime = false;
-	params.print_timestamps = false;
-	params.suppress_blank = true;
-	params.suppress_nst = true;
-	params.temperature = 0.0f;
-	params.max_tokens = 64;
-	params.no_timestamps = true;
-	if (argc > 5)
-		params.audio_ctx = atoi(argv[5]);
-	printf("AUDIO_CTX: %d\n", params.audio_ctx);
-	params.language = language.constData();
-
-	if (whisper_full(ctx, params, audio.data(), (int)audio.size()) != 0) {
-		printf("FAIL: recognition failed\n");
-		whisper_free(ctx);
+	akvarium::VoskModel *model = api.model_new(argv[1]);
+	if (!model) {
+		printf("FAIL: cannot load model from %s\n", argv[1]);
 		return 1;
 	}
 
+	akvarium::VoskRecognizer *rec = api.recognizer_new(model, 16000.0f);
+	if (!rec) {
+		printf("FAIL: cannot create recognizer\n");
+		api.model_free(model);
+		return 1;
+	}
+
+	api.recognizer_set_words(rec, 1);
+
+	const auto pcm = akvarium::FloatToPcm16(audio);
+	const int chunkSize = 4000;
+	const char *byteData = reinterpret_cast<const char *>(pcm.data());
+	const int totalBytes = static_cast<int>(pcm.size() * sizeof(int16_t));
+
+	for (int offset = 0; offset < totalBytes; offset += chunkSize) {
+		const int bytes = std::min(chunkSize, totalBytes - offset);
+		api.recognizer_accept_waveform(rec, byteData + offset, bytes);
+	}
+
+	const char *jsonStr = api.recognizer_final_result(rec);
 	QString text;
+	int tokens = 0;
 	double sumP = 0.0;
 	double minP = 1.0;
-	int tokens = 0;
-	double noSpeech = 0.0;
 
-	const int segments = whisper_full_n_segments(ctx);
-	for (int i = 0; i < segments; i++) {
-		noSpeech = std::max(noSpeech, (double)whisper_full_get_segment_no_speech_prob(ctx, i));
-		text += QString::fromUtf8(whisper_full_get_segment_text(ctx, i)).trimmed() + QChar(' ');
+	if (jsonStr && *jsonStr) {
+		const QJsonDocument doc = QJsonDocument::fromJson(QByteArray(jsonStr));
+		const QJsonObject obj = doc.object();
+		text = obj.value(QStringLiteral("text")).toString().trimmed();
 
-		const int count = whisper_full_n_tokens(ctx, i);
-		for (int t = 0; t < count; t++) {
-			const char *tokenText = whisper_full_get_token_text(ctx, i, t);
-			if (!tokenText || !*tokenText || (tokenText[0] == '<' && tokenText[1] == '|'))
-				continue;
-			const double p = (double)whisper_full_get_token_p(ctx, i, t);
-			sumP += p;
-			minP = std::min(minP, p);
-			tokens++;
+		const QJsonArray words = obj.value(QStringLiteral("result")).toArray();
+		tokens = words.size();
+		for (const auto &wVal : words) {
+			const double c = wVal.toObject().value(QStringLiteral("conf")).toDouble(1.0);
+			sumP += c;
+			minP = std::min(minP, c);
 		}
 	}
-	text = text.trimmed();
-	whisper_free(ctx);
 
-	const double meanP = tokens > 0 ? sumP / (double)tokens : 0.0;
+	api.recognizer_free(rec);
+	api.model_free(model);
 
+	const double meanP = tokens > 0 ? sumP / (double)tokens : 1.0;
 	printf("TRANSCRIPT: %s\n", text.toUtf8().constData());
-	printf("CONFIDENCE: no_speech %.2f, avg_p %.2f, min_p %.2f, tokens %d\n", noSpeech, meanP,
-	       tokens > 0 ? minP : 0.0, tokens);
+	printf("CONFIDENCE: avg_p %.2f, min_p %.2f, tokens %d\n", meanP, tokens > 0 ? minP : 1.0, tokens);
 
 	bool rejected = false;
-	if (akvarium::IsLikelyHallucination(text)) {
-		printf("REJECT: hallucination\n");
-		rejected = true;
-	}
-	if (noSpeech > 0.45) {
-		printf("REJECT: no-speech probability %.2f\n", noSpeech);
-		rejected = true;
-	}
-	if (tokens >= 2 && meanP < 0.45) {
-		printf("REJECT: low token confidence %.2f\n", meanP);
+	if (text.isEmpty()) {
+		printf("REJECT: empty transcript\n");
 		rejected = true;
 	}
 
